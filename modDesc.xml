@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="109">
     <author>Chris Mason</author>
-    <version>1.0.0.0</version>
+    <version>0.9.0.0</version>
     <title>
-        <en>DroneCam</en>
+        <en>DroneCam (Beta)</en>
     </title>
     <description>
         <en>
