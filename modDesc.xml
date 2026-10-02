@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<modDesc descVersion="109">
+    <author>Chris Mason</author>
+    <version>1.0.0.0</version>
+    <title>
+        <en>DroneCam</en>
+    </title>
+    <description>
+        <en>
+            <![CDATA[Automatically switches to a smooth, drone-style camera while your vehicle is working a field, and returns to the normal vehicle camera when work stops.
+
+Three camera modes: Chase, Top-down and Orbit. Height is clamped above the terrain and raised automatically to clear trees and buildings. Purely client-side; all settings are stored locally.]]>
+        </en>
+    </description>
+
+    <multiplayer supported="true"/>
+    <iconFilename>icon_DroneCam.dds</iconFilename>
+
+    <l10n filenamePrefix="l10n/l10n"/>
+
+    <extraSourceFiles>
+        <sourceFile filename="scripts/DroneCamSettings.lua"/>
+        <sourceFile filename="scripts/DroneCamWorkDetect.lua"/>
+        <sourceFile filename="scripts/DroneCamCamera.lua"/>
+        <sourceFile filename="scripts/DroneCam.lua"/>
+    </extraSourceFiles>
+
+    <actions>
+        <action name="DRONECAM_TOGGLE" category="VEHICLE" ignoreComboMask="false"/>
+        <action name="DRONECAM_MODE" category="VEHICLE" ignoreComboMask="false"/>
+        <action name="DRONECAM_FORCE" category="VEHICLE" ignoreComboMask="false"/>
+        <action name="DRONECAM_HUD" category="VEHICLE" ignoreComboMask="false"/>
+    </actions>
+
+    <inputBinding>
+        <actionBinding action="DRONECAM_TOGGLE">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_d"/>
+        </actionBinding>
+        <actionBinding action="DRONECAM_MODE">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_c"/>
+        </actionBinding>
+        <actionBinding action="DRONECAM_FORCE">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_f"/>
+        </actionBinding>
+        <actionBinding action="DRONECAM_HUD">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_h"/>
+        </actionBinding>
+    </inputBinding>
+</modDesc>

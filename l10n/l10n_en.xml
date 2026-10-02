@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<l10n>
+    <texts>
+        <text name="input_DRONECAM_TOGGLE" text="DroneCam: Toggle automatic mode" />
+        <text name="input_DRONECAM_MODE" text="DroneCam: Cycle camera mode" />
+        <text name="input_DRONECAM_FORCE" text="DroneCam: Force drone camera" />
+        <text name="input_DRONECAM_HUD" text="DroneCam: Hide HUD while flying" />
+
+        <text name="droneCam_auto" text="DroneCam" />
+        <text name="droneCam_mode" text="DroneCam mode" />
+        <text name="droneCam_force" text="DroneCam forced" />
+        <text name="droneCam_hideHud" text="DroneCam hide HUD" />
+
+        <text name="droneCam_mode_chase" text="Chase" />
+        <text name="droneCam_mode_topDown" text="Top-down" />
+        <text name="droneCam_mode_orbit" text="Orbit" />
+
+        <text name="droneCam_on" text="on" />
+        <text name="droneCam_off" text="off" />
+    </texts>
+</l10n>

@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Packaged mod, rebuilt from the sources in this repo
+FS25_DroneCam.zip
+
+# Test harness build output and the Lua toolchain built to run it
+lua-*/
+lua-*.tar.gz
+*.o
+*.a
+/lua
+/luac
+icon_preview.png
+profile/
