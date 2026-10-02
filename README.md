@@ -35,7 +35,10 @@ scripts/DroneCamCamera.lua       camera node, smoothing, modes
 scripts/DroneCamWorkDetect.lua   field-work detection and hysteresis
 scripts/DroneCamSettings.lua     defaults and XML persistence
 test/test_dronecam.lua           offline test suite
+tools/make_icon.py               regenerates icon_DroneCam.dds
 ```
+
+`test/` and `tools/` are development-only and are left out of the release zip.
 
 ## Running the tests
 
@@ -63,16 +66,30 @@ It prints a line per check and exits non-zero if any fail. Set `MOD_DIR` to run
 it against a mod folder somewhere else. Lua 5.1 specifically: the suite and the
 mod both use `math.atan2`, which later versions removed.
 
+## Regenerating the icon
+
+`icon_DroneCam.dds` is a 256x256 DXT1 texture built by `tools/make_icon.py`,
+which needs nothing beyond the Python 3 that ships with macOS:
+
+```sh
+python3 tools/make_icon.py icon_DroneCam.dds
+```
+
+The output is deterministic, so re-running it on an unchanged script reproduces
+the committed file byte for byte.
+
 ## Packaging a release
 
 From the mod root:
 
 ```sh
-zip -r ../FS25_DroneCam.zip . -x "test/*" ".git/*" ".gitignore"
+zip -r ~/Desktop/FS25_DroneCam.zip . -x "test/*" "tools/*" "README.md" ".git/*" ".gitignore"
 ```
 
-That leaves the test suite and git metadata out of the archive. Drop the
-resulting zip into your `mods/` folder.
+That leaves the development-only files and git metadata out of the archive.
+It writes to the Desktop deliberately: `mods/` is the parent of this folder, and
+a zip sitting next to the unpacked folder would leave the game seeing the mod
+twice. Move the zip into `mods/` only after removing the folder.
 
 To run it unpacked instead, put this folder in `mods/` directly — the game only
 loads unzipped mods with developer controls enabled (`<development><controls>`
