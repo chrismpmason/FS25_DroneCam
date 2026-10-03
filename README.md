@@ -20,9 +20,11 @@ that cuts between those, five close-ups and nine creator shots:
   passes the camera swings round in about 1.4 seconds to watch it go, then
   rises into the chase position before anything towed behind can reach it.
   It is only used on a straight run with no headland coming, at 7 km/h or
-  more, out of tall standing crop, not under trees, on level ground,
-  when raycasts against the vehicle's collision show at least 0.55m clear
-  underneath, and when anything towed leaves a clear gap of 2.5m or more,
+  more, out of tall standing crop, not under trees, on even ground (a
+  steady slope is fine, a bump is not), when raycasts against the vehicle's
+  collision show at least 0.55m clear underneath (front weights included:
+  small front attachments are fine if they clear it, headers and front
+  mowers are not), and when anything towed leaves a clear gap of 2.5m or more,
   empty all the way up on the centre line, with time to rise. In practice
   that means self-propelled machines with clearance, a tractor on its own
   (Ctrl+F), or trailed kit with a clear gap; most mounted implements leave
@@ -95,7 +97,7 @@ downloads the source, with development files the game doesn't need.
 
 ## Controls
 
-All four are rebindable in the game's control settings.
+All are rebindable in the game's control settings.
 
 | Default | Action |
 | --- | --- |
@@ -103,6 +105,15 @@ All four are rebindable in the game's control settings.
 | `Ctrl+C` | Cycle Chase → Top-down → Orbit → Auto director (story) → Auto director (random) |
 | `Ctrl+F` | Force the drone camera on, even when not working |
 | `Ctrl+H` | Hide the HUD while the drone is flying |
+| `Ctrl+G` | Drive-over now, if it can be done safely (says why not if it can't) |
+| `Ctrl+Shift+D` | Debug overlay: the shot on screen, the field, and why a drive-over can or can't be done |
+
+**Hired workers, Courseplay and AutoDrive.** While one of their jobs is running
+on your vehicle, a drone that is up stays up, even while the vehicle waits or
+isn't working, until the job ends, you leave the vehicle or change camera, or you
+press Ctrl+D or Ctrl+F (which stands it down for the rest of that job). While the
+vehicle stands still only steady wide shots are used — chase, top-down, a slower
+orbit, establishing, long lens — never close-ups, drive-overs or moving shots.
 
 Settings persist to `modSettings/FS25_DroneCam.xml` in your game profile
 directory. Values out of range are clamped on load, so a hand-edited file cannot

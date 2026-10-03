@@ -35,6 +35,8 @@ Three camera modes: Chase, Top-down and Orbit. Height is clamped above the terra
         <action name="DRONECAM_MODE" category="VEHICLE" ignoreComboMask="false"/>
         <action name="DRONECAM_FORCE" category="VEHICLE" ignoreComboMask="false"/>
         <action name="DRONECAM_HUD" category="VEHICLE" ignoreComboMask="false"/>
+        <action name="DRONECAM_DRIVE_OVER" category="VEHICLE" ignoreComboMask="false"/>
+        <action name="DRONECAM_DEBUG" category="VEHICLE" ignoreComboMask="false"/>
     </actions>
 
     <inputBinding>
@@ -49,6 +51,12 @@ Three camera modes: Chase, Top-down and Orbit. Height is clamped above the terra
         </actionBinding>
         <actionBinding action="DRONECAM_HUD">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_h"/>
+        </actionBinding>
+        <actionBinding action="DRONECAM_DRIVE_OVER">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_g"/>
+        </actionBinding>
+        <actionBinding action="DRONECAM_DEBUG">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lctrl KEY_lshift KEY_d"/>
         </actionBinding>
     </inputBinding>
 </modDesc>

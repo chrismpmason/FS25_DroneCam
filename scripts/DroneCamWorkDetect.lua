@@ -78,6 +78,33 @@ local function getIsAIWorking(vehicle)
     return spec.isActive == true
 end
 
+---True while the vehicle has an automated job running: a hired worker (any
+---FS25 AI job, which includes Courseplay's), or Courseplay or AutoDrive by
+---their own flags when those mods are installed.
+---@return boolean
+function DroneCamWorkDetect.getIsAIJobActive(vehicle)
+    if vehicle == nil then
+        return false
+    end
+
+    if vehicle.getIsAIActive ~= nil and vehicle:getIsAIActive() == true then
+        return true
+    end
+
+    -- Courseplay
+    if vehicle.getIsCpActive ~= nil and vehicle:getIsCpActive() == true then
+        return true
+    end
+
+    -- AutoDrive
+    local ad = vehicle.ad
+    if ad ~= nil and ad.stateModule ~= nil and ad.stateModule.isActive ~= nil and ad.stateModule:isActive() == true then
+        return true
+    end
+
+    return false
+end
+
 ---Tests the vehicle and every vehicle attached to it.
 ---@param vehicle table @Root vehicle (the one the player controls)
 ---@param followAI boolean @Whether an AI helper driving this vehicle counts as work

@@ -194,6 +194,8 @@ function DroneCamCamera:resetTracking()
     self.lastRotY = nil
     self.fieldTimer = nil
     self.fieldReach = nil
+    self.stationaryTime = 0
+    self.isStationary = false
     -- The flight starts from the vehicle's own camera, which is usually inside
     -- the cab. The hard floors that keep the camera out of the vehicle and the
     -- crop only take hold once it has flown clear, or they would yank it out.
@@ -204,6 +206,8 @@ end
 ---directly instead of blending to it.
 function DroneCamCamera:resetShot()
     self.shot = nil
+    self.forcedShot = nil
+    self.activeTime = 0
     self.shotSide = 1
     self.plan = nil
     self.planCache = {}
@@ -495,6 +499,12 @@ end
 
 ---@return boolean @False for a shot with nothing to film or nowhere to film it from
 function DroneCamCamera:getIsShotAvailable(shot)
+    -- Standing still: steady wide shots only. A drive-over, a push-in or a
+    -- close-up of a vehicle that is not going anywhere makes no sense.
+    if self.isStationary and not DroneCamCamera.STATIONARY_SHOTS[shot] then
+        return false
+    end
+
     if shot == DroneCamSettings.SHOT_IMPLEMENT then
         local rig = self:getRig(self.vehicle)
         return rig ~= nil and rig.work ~= nil
@@ -890,9 +900,156 @@ function DroneCamCamera:getCurrentPose(vehicle)
     return pose
 end
 
+---Below this speed (m/s) for STATIONARY_TIME seconds the vehicle counts as
+---standing still (a hired worker waiting, a combine unloading on the spot):
+---only steady wide shots are used, and the orbit circles at half speed.
+DroneCamCamera.STATIONARY_SPEED = 0.5
+DroneCamCamera.STATIONARY_TIME = 1.5
+DroneCamCamera.STATIONARY_ORBIT_FACTOR = 0.5
+DroneCamCamera.STATIONARY_SHOTS = {
+    [DroneCamSettings.MODE_CHASE] = true,
+    [DroneCamSettings.MODE_TOPDOWN] = true,
+    [DroneCamSettings.MODE_ORBIT] = true,
+    [DroneCamSettings.SHOT_ESTABLISHING] = true,
+    [DroneCamSettings.SHOT_LONG_LENS] = true
+}
+
+---Plain names for the debug overlay.
+DroneCamCamera.SHOT_NAMES = {
+    [DroneCamSettings.MODE_CHASE] = "chase",
+    [DroneCamSettings.MODE_TOPDOWN] = "top-down",
+    [DroneCamSettings.MODE_ORBIT] = "orbit",
+    [DroneCamSettings.SHOT_WHEEL] = "wheel cam",
+    [DroneCamSettings.SHOT_IMPLEMENT] = "implement cam",
+    [DroneCamSettings.SHOT_SIDE] = "side tracking",
+    [DroneCamSettings.SHOT_FRONT] = "front low",
+    [DroneCamSettings.SHOT_REAR_QUARTER] = "rear quarter",
+    [DroneCamSettings.SHOT_ESTABLISHING] = "establishing",
+    [DroneCamSettings.SHOT_LONG_LENS] = "long lens",
+    [DroneCamSettings.SHOT_EDGE_PAN] = "field-edge pan",
+    [DroneCamSettings.SHOT_HEADLAND] = "headland",
+    [DroneCamSettings.SHOT_PUSH_IN] = "push-in",
+    [DroneCamSettings.SHOT_PULL_OUT] = "pull-out reveal",
+    [DroneCamSettings.SHOT_FLY_OVER] = "fly-over",
+    [DroneCamSettings.SHOT_RISE_UP] = "rise-up",
+    [DroneCamSettings.SHOT_SLIDE] = "slide",
+    [DroneCamSettings.SHOT_DRIVE_OVER] = "drive-over"
+}
+
+---The debug overlay's drive-over check is repeated this often, not every
+---frame: it casts a few hundred rays.
+DroneCamCamera.DEBUG_INTERVAL = 1
+
+---Keeps the debug overlay's drive-over status up to date while it is shown.
+function DroneCamCamera:updateDebug(dtSeconds, vehicle)
+    if not self.settings.showDebug then
+        return
+    end
+
+    self.debugTimer = (self.debugTimer or math.huge) + dtSeconds
+    if self.debugTimer < DroneCamCamera.DEBUG_INTERVAL then
+        return
+    end
+    self.debugTimer = 0
+
+    local plan = self.plan
+    if self.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan ~= nil and plan.shot == self.shot then
+        self.debugDriveOver = "running (" .. tostring(plan.phase) .. ")"
+        return
+    end
+    local found, reason = DroneCamCreator.plan(self, vehicle, DroneCamSettings.SHOT_DRIVE_OVER, false)
+    self.debugDriveOver = found ~= nil and "possible now" or ("not possible: " .. tostring(reason))
+end
+
+---Lines for the debug overlay: the shot on screen, the field, why the
+---drive-over can or cannot be done, and how high the camera is.
+---@return table
+function DroneCamCamera:getDebugLines()
+    local lines = {}
+    local name = DroneCamCamera.SHOT_NAMES[self.shot] or tostring(self.shot)
+    local plan = self.plan
+    if self.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan ~= nil and plan.shot == self.shot then
+        name = name .. " - " .. tostring(plan.phase)
+    end
+    if self.fromPose ~= nil then
+        name = name .. " (gliding in)"
+    end
+    if self.forcedShot ~= nil then
+        name = name .. " [Ctrl+G]"
+    end
+    lines[#lines + 1] = "DroneCam shot: " .. name
+
+    local field = self.fieldInfo
+    lines[#lines + 1] = ("Field: %s%s"):format(tostring(self.fieldClass or "medium"),
+        field ~= nil and (" (%.1f ha, %.0fm across)"):format(field.areaHa, field.length) or " (no field found)")
+
+    lines[#lines + 1] = "Drive-over: " .. tostring(self.debugDriveOver or "checking...")
+    if plan ~= nil and plan.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan.lostReason ~= nil then
+        lines[#lines + 1] = "Last drive-over dropped: " .. plan.lostReason
+    end
+    if self.lastForceResult ~= nil then
+        lines[#lines + 1] = "Last Ctrl+G: " .. self.lastForceResult
+    end
+
+    if self.isStationary then
+        lines[#lines + 1] = "Vehicle standing still: steady wide shots only"
+    end
+
+    local ground = getTerrainHeightAt(self.posX, self.posZ)
+    lines[#lines + 1] = ("Camera %.2fm above ground, obstacle lift %.2fm"):format(self.posY - ground, self.heightBoost)
+
+    return lines
+end
+
+---A drive-over asked for with the force key waits until the camera has been
+---flying this long, so the vehicle's movement is known.
+DroneCamCamera.FORCE_SETTLE_TIME = 0.5
+
+---Asks for a drive-over as soon as one can be done safely (Ctrl+G).
+---@param onResult function|nil @Called with (true) when it starts or (false, reason) when it cannot
+function DroneCamCamera:requestDriveOver(onResult)
+    self.driveOverRequest = { onResult = onResult }
+end
+
+---The shot that should be on screen: a drive-over asked for with the force
+---key while it runs, otherwise whatever the mode or the director wants.
 ---@param heading number|nil @Raw vehicle heading in radians
----@return integer @Angle that should be on screen
+---@return integer
 function DroneCamCamera:getWantedShot(dtSeconds, heading)
+    local wanted = self:getDirectorShot(dtSeconds, heading)
+    local driveOver = DroneCamSettings.SHOT_DRIVE_OVER
+
+    local request = self.driveOverRequest
+    if request ~= nil and self.vehicle ~= nil and (self.activeTime or 0) >= DroneCamCamera.FORCE_SETTLE_TIME then
+        self.driveOverRequest = nil
+        local plan, reason = DroneCamCreator.plan(self, self.vehicle, driveOver, true)
+        self.lastForceResult = plan ~= nil and "started" or reason
+        if plan ~= nil then
+            self.forcedShot = driveOver
+            self.planCache[driveOver] = { frameId = self.frameId, plan = plan }
+        end
+        if request.onResult ~= nil then
+            request.onResult(plan ~= nil, reason)
+        end
+    end
+
+    if self.forcedShot ~= nil then
+        local plan = self.plan
+        local isOver = self.shot == self.forcedShot
+            and (plan == nil or plan.shot ~= self.forcedShot or plan.isDone or plan.isLost)
+        if isOver then
+            self.forcedShot = nil
+        else
+            return self.forcedShot
+        end
+    end
+
+    return wanted
+end
+
+---@param heading number|nil @Raw vehicle heading in radians
+---@return integer @Angle the mode or the director wants on screen
+function DroneCamCamera:getDirectorShot(dtSeconds, heading)
     local mode = self.settings.mode
 
     if not DroneCamSettings.getIsAutoMode(mode) then
@@ -1007,8 +1164,18 @@ end
 ---Raises the camera while the line from the aim point to the camera is blocked
 ---by a tree or a building, and lets it settle again once the view is clear.
 ---Raising rather than zooming in keeps the framing consistent.
+---
+---Not for the drive-over: its spot was checked for a clear view when it was
+---planned, and a raycast skimming the ground from a lens 0.3m up would lift
+---it off the ground. While it runs any lift left from the shot before drains
+---away, quickly enough to be gone before the vehicle arrives.
 ---@param dtSeconds number
 function DroneCamCamera:updateObstacleClearance(dtSeconds)
+    if DroneCamCreator.getIsDriveOverGrounded(self) then
+        self.heightBoost = math.max(self.heightBoost - DroneCamCreator.DRIVE_OVER_LIFT_DRAIN * dtSeconds, 0)
+        return
+    end
+
     local dx = self.posX - self.lookX
     local dy = self.posY - self.lookY
     local dz = self.posZ - self.lookZ
@@ -1127,6 +1294,7 @@ function DroneCamCamera:update(dt, vehicle)
     local dtSeconds = dt * 0.001
 
     self.frameId = self.frameId + 1
+    self.activeTime = (self.activeTime or 0) + dtSeconds
 
     -- Smooth the vehicle heading first; every mode is built on top of it, so a
     -- U-turn becomes a slow sweeping pan rather than a snap.
@@ -1144,7 +1312,9 @@ function DroneCamCamera:update(dt, vehicle)
     self.vehicle = vehicle
     self.rig = nil
 
-    self.orbitAngle = self.orbitAngle + math.rad(settings.orbitSpeed) * dtSeconds
+    -- A slower orbit round a vehicle that is standing still.
+    local orbitFactor = self.isStationary and DroneCamCamera.STATIONARY_ORBIT_FACTOR or 1
+    self.orbitAngle = self.orbitAngle + math.rad(settings.orbitSpeed) * orbitFactor * dtSeconds
 
     -- Ground speed, for judging how soon the end of the row comes up.
     local vehicleX, vehicleY, vehicleZ = getWorldTranslation(vehicle.rootNode)
@@ -1153,6 +1323,17 @@ function DroneCamCamera:update(dt, vehicle)
         local speed = math.sqrt(dx * dx + dz * dz) / dtSeconds
         self.vehicleSpeed = self.vehicleSpeed + (speed - self.vehicleSpeed) * smoothingAlpha(dtSeconds, 2)
     end
+
+    local speedNow = self.vehicleSpeed
+    if vehicle.getLastSpeed ~= nil then
+        speedNow = vehicle:getLastSpeed() / 3.6
+    end
+    if speedNow < DroneCamCamera.STATIONARY_SPEED then
+        self.stationaryTime = (self.stationaryTime or 0) + dtSeconds
+    else
+        self.stationaryTime = 0
+    end
+    self.isStationary = self.stationaryTime >= DroneCamCamera.STATIONARY_TIME
 
     local isBlendingOut = self.blendOutActive == true
     local desiredPosX, desiredPosY, desiredPosZ
@@ -1182,6 +1363,7 @@ function DroneCamCamera:update(dt, vehicle)
         self:updateField(dtSeconds, vehicle)
         self:updateShot(dtSeconds, vehicle, targetHeading)
         DroneCamCreator.updateDriveOver(self, dtSeconds, vehicle)
+        self:updateDebug(dtSeconds, vehicle)
 
         -- On the ground for a drive-over the camera is placed to the
         -- centimetre: no drift, no crop or vehicle floor for the vehicle it is

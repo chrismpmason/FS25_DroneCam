@@ -86,6 +86,7 @@ DroneCamSettings.SCHEMA = {
     { "closeUpMaxShot",  "float", 10,    2,   60 },
     { "movingMinShot",   "float", 7,     3,   60 },
     { "movingMaxShot",   "float", 10,    3,   60 },
+    { "showDebug",       "bool",  false },
     { "fieldSmallHa",    "float", 2,     0.1, 100 },
     { "fieldLargeHa",    "float", 10,    0.5, 1000 },
     { "followAI",        "bool",  false },

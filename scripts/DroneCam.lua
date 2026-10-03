@@ -112,7 +112,41 @@ end
 function DroneCam:keyEvent(unicode, sym, modifier, isDown)
 end
 
+---Debug overlay (Ctrl+Shift+D): the shot on screen and why the drive-over
+---can or cannot be done, top left, while the drone is flying.
 function DroneCam:draw()
+    if not self.settings.showDebug or self.camera == nil or self.state == DroneCam.STATE_OFF
+        or renderText == nil then
+        return
+    end
+
+    local lines = self.camera:getDebugLines()
+    if self.trackedVehicle ~= nil and DroneCamWorkDetect.getIsAIJobActive(self.trackedVehicle) then
+        lines[#lines + 1] = self.isAIHoldDismissed and "Helper job running: drone stood down (Ctrl+F)"
+            or "Helper job running: drone stays up until it ends"
+    end
+    local size = 0.014
+    local x, y = 0.01, 0.97
+
+    if setTextAlignment ~= nil and RenderText ~= nil then
+        setTextAlignment(RenderText.ALIGN_LEFT)
+    end
+    if setTextBold ~= nil then
+        setTextBold(false)
+    end
+
+    for i = 1, #lines do
+        local lineY = y - (i - 1) * size * 1.4
+        -- A dark copy underneath keeps it readable over a bright sky.
+        if setTextColor ~= nil then
+            setTextColor(0, 0, 0, 0.75)
+        end
+        renderText(x + 0.001, lineY - 0.0015, size, lines[i])
+        if setTextColor ~= nil then
+            setTextColor(1, 1, 1, 1)
+        end
+        renderText(x, lineY, size, lines[i])
+    end
 end
 
 ---Creates the camera on first use, once the mission and scene are up.
@@ -249,6 +283,13 @@ function DroneCam:update(dt)
         self.trackedVehicle = vehicle
     end
 
+    -- A take-off just for a Ctrl+G drive-over ends with it.
+    if self.isForcedForDriveOver and self.camera ~= nil and self.state == DroneCam.STATE_ACTIVE
+        and self.camera.driveOverRequest == nil and self.camera.forcedShot == nil then
+        self.isForced = false
+        self.isForcedForDriveOver = false
+    end
+
     local isWorking = self.workDetect:update(vehicle, dt)
 
     -- A manual camera change by the player wins until the job stops, so the mod
@@ -257,7 +298,18 @@ function DroneCam:update(dt)
         self.hasUserOverride = false
     end
 
-    local shouldRun = (self.isForced or (self.settings.enabled and isWorking)) and not self.hasUserOverride
+    -- A hired worker, Courseplay or AutoDrive job keeps a flying drone up
+    -- through stops and gaps in the work, until the job ends (or Ctrl+D /
+    -- Ctrl+F, which stand it down for the rest of the job).
+    local isAIJobActive = DroneCamWorkDetect.getIsAIJobActive(vehicle)
+    if not isAIJobActive then
+        self.isAIHoldDismissed = false
+    end
+    local isAIHold = isAIJobActive and self.settings.enabled and not self.isAIHoldDismissed
+        and self.state ~= DroneCam.STATE_OFF
+
+    local isWorkWanted = self.settings.enabled and isWorking and not self.isAIHoldDismissed
+    local shouldRun = (self.isForced or isWorkWanted or isAIHold) and not self.hasUserOverride
 
     if shouldRun then
         if self.state == DroneCam.STATE_OFF then
@@ -326,6 +378,16 @@ function DroneCam:onCycleMode()
 end
 
 function DroneCam:onToggleForce()
+    -- During a hired worker / Courseplay / AutoDrive job with the drone up on
+    -- its own, Ctrl+F means "hand back": stand down for the rest of the job.
+    if not self.isForced and self.state ~= DroneCam.STATE_OFF and self.trackedVehicle ~= nil
+        and DroneCamWorkDetect.getIsAIJobActive(self.trackedVehicle) then
+        self.isAIHoldDismissed = true
+        self:stopDrone(self.trackedVehicle)
+        showNotification(("%s: %s"):format(getText("droneCam_force"), getText("droneCam_off")))
+        return
+    end
+
     self.isForced = not self.isForced
     self.hasUserOverride = false
 
@@ -358,6 +420,38 @@ function DroneCam:onToggleHud()
         getText(self.settings.hideHud and "droneCam_on" or "droneCam_off")))
 end
 
+---Ctrl+G: do a drive-over now, if it can be done without clipping. Takes off
+---first if the drone is not flying. Says so if it cannot, and why.
+function DroneCam:onForceDriveOver()
+    if self.trackedVehicle == nil or not self:ensureCamera() then
+        return
+    end
+
+    if self.state == DroneCam.STATE_OFF and not self.isForced then
+        -- Take off for it, and land again once it is over (see update).
+        self.isForced = true
+        self.isForcedForDriveOver = true
+        self.hasUserOverride = false
+    end
+
+    self.camera:requestDriveOver(function(isStarted, reason)
+        if isStarted then
+            showNotification(getText("droneCam_driveOver"))
+        else
+            showNotification(("%s: %s"):format(getText("droneCam_driveOverNot"), tostring(reason)))
+        end
+    end)
+end
+
+---Ctrl+Shift+D: show or hide the debug overlay.
+function DroneCam:onToggleDebug()
+    self.settings.showDebug = not self.settings.showDebug
+    DroneCamSettings.store(self.settings)
+
+    showNotification(("%s: %s"):format(getText("droneCam_debug"),
+        getText(self.settings.showDebug and "droneCam_on" or "droneCam_off")))
+end
+
 ---Registers the mod's actions alongside the vehicle's own, so they are live
 ---whenever the player is in a vehicle and are cleaned up by the game on exit.
 function DroneCam.registerActionEvents(vehicle, superFunc, isActiveForInput, isActiveForInputIgnoreSelection)
@@ -373,7 +467,9 @@ function DroneCam.registerActionEvents(vehicle, superFunc, isActiveForInput, isA
         { InputAction.DRONECAM_TOGGLE, DroneCam.onToggleEnabled },
         { InputAction.DRONECAM_MODE,   DroneCam.onCycleMode },
         { InputAction.DRONECAM_FORCE,  DroneCam.onToggleForce },
-        { InputAction.DRONECAM_HUD,    DroneCam.onToggleHud }
+        { InputAction.DRONECAM_HUD,    DroneCam.onToggleHud },
+        { InputAction.DRONECAM_DRIVE_OVER, DroneCam.onForceDriveOver },
+        { InputAction.DRONECAM_DEBUG,  DroneCam.onToggleDebug }
     }
 
     for i = 1, #actions do

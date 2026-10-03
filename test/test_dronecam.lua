@@ -202,7 +202,15 @@ g_inputBinding = {
     setActionEventTextPriority = function() end,
     setActionEventTextVisibility = function() end
 }
-InputAction = { DRONECAM_TOGGLE = 1, DRONECAM_MODE = 2, DRONECAM_FORCE = 3, DRONECAM_HUD = 4 }
+InputAction = { DRONECAM_TOGGLE = 1, DRONECAM_MODE = 2, DRONECAM_FORCE = 3, DRONECAM_HUD = 4,
+                DRONECAM_DRIVE_OVER = 5, DRONECAM_DEBUG = 6 }
+-- Text drawn on screen, one entry per renderText call.
+RENDERED = {}
+function renderText(x, y, size, text) RENDERED[#RENDERED + 1] = text end
+function setTextColor() end
+function setTextAlignment() end
+function setTextBold() end
+RenderText = { ALIGN_LEFT = 0 }
 Utils = { overwrittenFunction = function(old, new) return function(...) return new(...) end end }
 Enterable = { onRegisterActionEvents = function() end }
 
@@ -2064,6 +2072,161 @@ check("and gets there", arrivedBy < 10, ("%.1fm short"):format(arrivedBy))
 camera.director.random = makeRng(5)
 FIELD = nil
 
+print("\n-- drive-over: why it is turned down --")
+FIELD, OBSTACLES = nil, {}
+local function reasonFor(spec, setup)
+    startOn(spec)
+    if setup ~= nil then setup() end
+    camera.planCache = {}
+    local plan, reason = DroneCamCreator.plan(camera, vehicle, DRIVE_OVER, false)
+    if setup ~= nil then setup(true) end
+    return plan, reason or ""
+end
+local function says(reason, text) return reason:find(text, 1, true) ~= nil end
+
+local _, why = reasonFor(LOW_TRACTOR)
+check("too low: says so, and where", says(why, "underside too low") and says(why, "needs 0.55m"), why)
+_, why = reasonFor(MOUNTED)
+check("mounted implement: says there is no room to rise", says(why, "implement too close behind"), why)
+_, why = reasonFor(TRAILED_DRAWBAR)
+check("drawbar: says so", says(why, "underside too low") or says(why, "drawbar"), why)
+_, why = reasonFor(COMBINE_BODY)
+check("header: says so", says(why, "implement on the front"), why)
+_, why = reasonFor(SOLO_TRACTOR, function(undo) CROP_AT = undo and function() return 0, 0 end or function() return 1, 5 end end)
+check("standing crop: says how high", says(why, "standing crop 3.2m"), why)
+_, why = reasonFor(SOLO_TRACTOR, function(undo) FIELD = (not undo) and { -100, 100, -300, 60 } or nil end)
+check("row end: says how far", says(why, "row end too close"), why)
+_, why = reasonFor(SOLO_TRACTOR, function(undo)
+    if undo then VEHICLE_SPEED = 3 return end
+    VEHICLE_SPEED = 1
+    tick(3, true)
+end)
+check("too slow: says the speed", says(why, "too slow"), why)
+
+print("\n-- drive-over: front weights and slopes --")
+-- Front weights hang off the front linkage: a small separate implement.
+local WEIGHT = { along = 3.2, width = 0.8, length = 0.8, height = 1.0, workWidth = 0.1, workDepth = 0.1,
+                 bodies = { { -0.4, 0.4, 0.6, 1.0, 2.8, 3.6 } } }
+local WEIGHT_LOW = { along = 3.2, width = 0.8, length = 0.8, height = 1.0, workWidth = 0.1, workDepth = 0.1,
+                     bodies = { { -0.4, 0.4, 0.42, 1.0, 2.8, 3.6 } } }
+local WITH_WEIGHT = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { WEIGHT } }
+local WITH_LOW_WEIGHT = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { WEIGHT_LOW } }
+local weightPlan, weightWhy = reasonFor(WITH_WEIGHT)
+check("front weights do not rule it out when they clear the lens", weightPlan ~= nil, weightWhy)
+if weightPlan ~= nil then
+    local r = DroneCamRig.measure(vehicle, heading)
+    local _, spotAlong = DroneCamRig.toLocal(r, weightPlan.x, weightPlan.z)
+    check("the 30-40m is measured from the weights, not the bonnet", spotAlong - 3.6 >= 30 - 0.01, ("%.1f"):format(spotAlong))
+end
+_, why = reasonFor(WITH_LOW_WEIGHT)
+check("front weights hanging too low do, and it says so", says(why, "underside too low") and says(why, "in front of the vehicle"), why)
+
+-- The test tractor does not follow the terrain, so the slope starts just
+-- ahead of it and runs on past the spot.
+local slopePlan, slopeWhy = reasonFor(SOLO_TRACTOR, function(undo)
+    if undo then TERRAIN_FN = nil return end
+    local _, _, z0 = getWorldTranslation(vehicle.rootNode)
+    local slopeFrom = z0 + 8
+    TERRAIN_FN = function(x, z) return z > slopeFrom and (z - slopeFrom) * 0.10 or 0 end
+end)
+-- 10%: 0.15m either side of the spot, more than a bump is allowed to be.
+check("a steady 10% slope is fine", slopePlan ~= nil, slopeWhy)
+local spotPlan = reasonFor(SOLO_TRACTOR)
+_, why = reasonFor(SOLO_TRACTOR, function(undo)
+    TERRAIN_FN = (not undo) and function(x, z)
+        return math.abs(z - spotPlan.z) < 0.5 and 0.3 or 0
+    end or nil
+end)
+check("a bump where the camera sits is not, and it says so", says(why, "ground not even"), why)
+
+print("\n-- drive-over: nothing lifts the camera off the ground --")
+startOn(SOLO_TRACTOR)
+local stayedDown, ran, worst = true, false, 0
+if available() then
+    camera.director:cutTo(DRIVE_OVER)
+    -- Lift left over from the shot before, and every obstacle raycast hitting.
+    camera.heightBoost = 15
+    tick(3, true)
+    RAYCAST_HIT = true
+    tick(30, true, 0, function()
+        local p = camera.plan
+        local phase = camera.shot == DRIVE_OVER and p ~= nil and p.phase or nil
+        if phase == "under" or phase == "swing" then
+            ran = true
+            local _, y = getWorldTranslation(cn)
+            worst = math.max(worst, math.abs(y - TERRAIN_HEIGHT - 0.3))
+        end
+    end)
+    RAYCAST_HIT = false
+end
+check("the drive-over ran", ran)
+check("stays 0.3m up as the tractor passes, whatever the obstacle raycast says", ran and worst < 0.01,
+      ("off by %.2fm"):format(worst))
+
+print("\n-- debug overlay --")
+startOn(SOLO_TRACTOR)
+DroneCam.settings.showDebug = false
+DroneCam:onToggleDebug()
+check("Ctrl+Shift+D turns the overlay on", DroneCam.settings.showDebug == true)
+tick(1.2, true)
+RENDERED = {}
+DroneCam:draw()
+local shown = table.concat(RENDERED, "\n")
+check("shows the shot on screen", says(shown, "DroneCam shot: "), shown)
+check("shows the drive-over is possible", says(shown, "Drive-over: possible now"), shown)
+check("shows the camera's height and any obstacle lift", says(shown, "above ground, obstacle lift"), shown)
+startOn(MOUNTED)
+tick(1.2, true)
+RENDERED = {}
+DroneCam:draw()
+shown = table.concat(RENDERED, "\n")
+check("shows why the drive-over is turned down", says(shown, "Drive-over: not possible: implement too close behind"), shown)
+DroneCam:onToggleDebug()
+RENDERED = {}
+DroneCam:draw()
+check("and goes away again", #RENDERED == 0)
+
+print("\n-- Ctrl+G: drive-over on demand --")
+startOn(SOLO_TRACTOR)
+DroneCam.settings.mode = CHASE
+tick(3, true)
+local notes = #NOTIFICATIONS
+DroneCam:onForceDriveOver()
+tick(1, true)
+check("Ctrl+G starts a drive-over in chase mode", camera.shot == DRIVE_OVER and camera.forcedShot == DRIVE_OVER)
+check("and says so", NOTIFICATIONS[#NOTIFICATIONS] == "droneCam_driveOver")
+local forcedPhases = {}
+tick(40, true, 0, function()
+    local p = camera.plan
+    if camera.shot == DRIVE_OVER and p ~= nil and forcedPhases[#forcedPhases] ~= p.phase then
+        forcedPhases[#forcedPhases + 1] = p.phase
+    end
+end)
+check("runs the whole drive-over", table.concat(forcedPhases, ">") == "approach>under>swing>rise>join>tail",
+      table.concat(forcedPhases, ">"))
+check("then goes back to chase", camera.shot == CHASE and camera.forcedShot == nil)
+
+startOn(MOUNTED)
+DroneCam.settings.mode = CHASE
+tick(3, true)
+DroneCam:onForceDriveOver()
+tick(1, true)
+check("Ctrl+G with a mounted implement: no drive-over", camera.shot ~= DRIVE_OVER)
+check("and says why", says(NOTIFICATIONS[#NOTIFICATIONS] or "", "droneCam_driveOverNot: implement too close behind"),
+      NOTIFICATIONS[#NOTIFICATIONS])
+
+-- Not working, drone landed: Ctrl+G takes off for it and lands afterwards.
+startOn(SOLO_TRACTOR)
+DroneCam.settings.mode = CHASE
+tick(12, false)
+check("drone landed before Ctrl+G", not droneIsActive())
+DroneCam:onForceDriveOver()
+local tookOff, dropped = false, false
+tick(2, false, 0, function() tookOff = tookOff or camera.shot == DRIVE_OVER end)
+check("Ctrl+G takes off and starts the drive-over", tookOff and droneIsActive())
+tick(45, false)
+check("and lands again when it is over", not droneIsActive() and not DroneCam.isForced)
+
 print("\n-- drive-over in the story: a hero shot about one loop in three --")
 -- Wichmann-Hill: Park-Miller's consecutive draws are too correlated for a
 -- frequency test that rolls at the same point in every loop.
@@ -2368,6 +2531,105 @@ check("flying with no field at all: medium mix, no limit", noField.class == "med
 
 g_fieldManager = nil
 FIELD, OBSTACLES = nil, {}
+DroneCam.settings.mode = CHASE
+VEHICLE_SPEED = 8
+driveVehicle(plainVehicle)
+end)()
+
+------------------------------------------------- hired workers, CP and AD
+
+;(function()
+local camera = DroneCam.camera
+local S = DroneCamSettings
+
+---A working tractor with an automated job that can be switched on and off.
+local function startJob(kind)
+    vehicle = makeRig({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels })
+    vehicle.spec_workArea = { workAreas = { { lastProcessingTime = -10000 } } }
+    local job = { active = false }
+    if kind == "helper" then
+        function vehicle:getIsAIActive() return job.active end
+    elseif kind == "courseplay" then
+        function vehicle:getIsCpActive() return job.active end
+    else
+        vehicle.ad = { stateModule = { isActive = function() return job.active end } }
+    end
+    VEHICLE_SPEED = 3
+    tick(12, false)
+    DroneCam.settings.mode = AUTO_RANDOM
+    tick(4, true)
+    job.active = true
+    return job
+end
+
+print("\n-- helper jobs keep the drone up --")
+for _, kind in ipairs({ "helper", "courseplay", "autodrive" }) do
+    local job = startJob(kind)
+    check(kind .. ": drone up while working", droneIsActive())
+    -- The work stops (turning at the end, waiting for a trailer) but the job runs on.
+    tick(20, false)
+    check(kind .. ": stays up while the job runs, working or not", droneIsActive())
+    job.active = false
+    tick(10, false)
+    check(kind .. ": hands back once the job ends", not droneIsActive())
+end
+
+print("\n-- standing still during a job: steady wide shots only --")
+local job = startJob("helper")
+VEHICLE_SPEED = 0
+camera.director.random = makeRng(777)
+local seen, badShots = {}, {}
+tick(120, false, 0, function()
+    if camera.isStationary and camera.fromPose == nil and camera.shot ~= nil then
+        seen[camera.shot] = true
+        if not DroneCamCamera.STATIONARY_SHOTS[camera.shot] then badShots[#badShots + 1] = camera.shot end
+    end
+end)
+check("drone still up after two minutes standing still", droneIsActive())
+check("only chase, top-down, orbit, establishing or long lens", #badShots == 0, table.concat(badShots, ","))
+local kinds = 0
+for _ in pairs(seen) do kinds = kinds + 1 end
+check("still changes shot while standing", kinds >= 3, tostring(kinds))
+camera.planCache = {}
+check("no drive-over offered while standing", not camera:getIsShotAvailable(S.SHOT_DRIVE_OVER))
+local orbitBefore = camera.orbitAngle
+tick(2, false)
+local orbitRate = math.deg(camera.orbitAngle - orbitBefore) / 2
+check("the orbit circles slowly", math.abs(orbitRate - DroneCam.settings.orbitSpeed * 0.5) < 0.2, ("%.1f deg/s"):format(orbitRate))
+VEHICLE_SPEED = 3
+tick(4, false)
+check("moving again: the full mix comes back", not camera.isStationary)
+
+print("\n-- standing down during a job --")
+job = startJob("helper")
+tick(10, false)
+check("up on the job", droneIsActive())
+DroneCam:onToggleForce()
+tick(8, true)
+check("Ctrl+F hands back during a job", not droneIsActive() and not DroneCam.isForced)
+tick(10, true)
+check("and stays handed back while the job runs, even working", not droneIsActive())
+job.active = false
+tick(1, true)
+tick(4, true)
+check("the next job (or work) brings it back", droneIsActive())
+
+job = startJob("courseplay")
+tick(10, false)
+DroneCam:onToggleEnabled()
+tick(8, false)
+check("Ctrl+D hands back during a job", not droneIsActive())
+DroneCam:onToggleEnabled()
+job.active = false
+
+job = startJob("autodrive")
+tick(10, false)
+vehicle.getIsEntered = function() return false end
+tick(0.2, false)
+check("leaving the vehicle hands back during a job", not droneIsActive())
+vehicle.getIsEntered = function() return true end
+job.active = false
+
 DroneCam.settings.mode = CHASE
 VEHICLE_SPEED = 8
 driveVehicle(plainVehicle)
