@@ -105,7 +105,9 @@ fixed shot that loses sight of the vehicle anyway is dropped within about a
 second. Close-ups are placed and scaled from the measured vehicle and
 implements, and kept out of the ground, the vehicle and standing crop.
 
-Every change of shot is a glide, never a cut: two seconds normally, longer
+Every change of shot is a glide, never a cut (the one exception: a ground
+pass called off with kit already over or beside the camera, where any glide
+would go through it): two seconds normally, longer
 (up to eight, at no more than 60 m/s) when the camera has a long way to go,
 swinging round and if need be over the vehicle. The long lens and the slide
 zoom in, and the zoom glides too. All of it has framerate-independent
@@ -124,7 +126,7 @@ the newest version is at the top of the page. Download `FS25_DroneCam_beta.zip`
 under **Assets**. `TESTERS.txt` alongside it lists what to try and what to send
 back.
 
-Current beta: [DroneCam v0.9.3 Beta](https://github.com/chrismpmason/FS25_DroneCam/releases/tag/v0.9.3-beta.1).
+Current beta: [DroneCam v0.9.4.3 Beta](https://github.com/chrismpmason/FS25_DroneCam/releases/tag/v0.9.4.3-beta).
 
 Use the zip from the release, not GitHub's green **Code** button: that
 downloads the source, with development files the game doesn't need.
@@ -150,7 +152,24 @@ All are rebindable in the game's control settings.
 | `Ctrl+F` | Force the drone camera on, even when not working |
 | `Ctrl+H` | Hide the HUD while the drone is flying |
 | `Ctrl+G` | Drive-over now, if it can be done safely (says why not if it can't) |
-| `Ctrl+Shift+D` | Debug overlay: the shot on screen, the field, and why a drive-over can or can't be done |
+| `Ctrl+Shift+D` | Debug overlay, on until pressed again (details below) |
+
+**Ctrl+G** asks for a drive-over straight away, in any mode, taking off first
+if the drone is down. It still never skips anything that could put the
+camera into the vehicle; only the row-end check is relaxed. The result
+("started", or why not) stays top left for 8 seconds, and every result,
+including a drive-over that is later dropped and why, goes into `log.txt` as a
+`[DroneCam] Ctrl+G:` line.
+
+**Ctrl+Shift+D** shows the debug overlay. It stays up until you press it
+again, even with the drone landed. It shows the shot on screen (and the
+drive-over's phase), the field and its size class, and the train as DroneCam
+sees it: each unit, its name for the allow list, whether it is lowered ("n/a"
+where that doesn't matter) and its fold state. It also gives the lowest
+collision shape underneath, and whether a drive-over is possible right now:
+the camera height and line it would use, or why not. Underneath that are the
+last dropped pass and the last Ctrl+G result, and the camera's height with any
+obstacle lift.
 
 **Drive-over mode.** The last mode on Ctrl+C sets up a drive-over on every
 straight run. When the drive-over isn't allowed (see the table above) or the
