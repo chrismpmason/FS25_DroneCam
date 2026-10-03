@@ -22,7 +22,10 @@ that cuts between those, five close-ups and nine creator shots:
   It is only used on a straight run with no headland coming, at 7 km/h or
   more, out of tall standing crop, not under trees, on even ground (a
   steady slope is fine, a bump is not), when raycasts against the vehicle's
-  collision show at least 0.55m clear underneath (front weights included:
+  collision find a line between the wheels with at least 0.35m clear
+  underneath, all along the vehicle (the camera takes the line with the most
+  room, beside a drawbar or hitch rather than under it, and comes down to
+  0.2m below the underside, never lower than 0.15m; front weights included:
   small front attachments are fine if they clear it, headers and front
   mowers are not), and when anything towed leaves a clear gap of 2.5m or more,
   empty all the way up on the centre line, with time to rise. In practice

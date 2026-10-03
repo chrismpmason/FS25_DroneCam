@@ -77,7 +77,24 @@ DroneCamCreator.SLIDE_FOV = 35
 DroneCamCreator.DRIVE_OVER_HEIGHT = 0.3
 ---The underside must clear the lens by this much as well (the near clip
 ---plane is pulled in to 0.05m for the shot).
-DroneCamCreator.DRIVE_OVER_HEADROOM = 0.25
+DroneCamCreator.DRIVE_OVER_HEADROOM = 0.2
+---The camera comes down to suit a lower underside (underside minus HEADROOM),
+---but no lower than this; a line with less than MIN_CLEARANCE is not used.
+DroneCamCreator.DRIVE_OVER_MIN_HEIGHT = 0.15
+DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE = 0.35
+---Lines are tried every LINE_STEP across the gap between the wheels; the lens
+---takes up a line and its neighbours either side. Lines within LINE_TIE of
+---the best clearance count as equal, and the most central of them is used.
+DroneCamCreator.DRIVE_OVER_LINE_STEP = 0.1
+DroneCamCreator.DRIVE_OVER_LINE_TIE = 0.02
+---A tyre is taken to be at least this wide either side of its centre, or
+---this fraction of its radius, plus LENS_MARGIN for the camera beside it.
+DroneCamCreator.DRIVE_OVER_MIN_TYRE_HALF = 0.25
+DroneCamCreator.DRIVE_OVER_TYRE_HALF_FACTOR = 0.35
+DroneCamCreator.DRIVE_OVER_LENS_MARGIN = 0.15
+---The underside map is kept this long (seconds) per vehicle: several hundred
+---rays, not to be cast again for every check.
+DroneCamCreator.DRIVE_OVER_GRID_CACHE_TIME = 5
 DroneCamCreator.DRIVE_OVER_NEAR_CLIP = 0.05
 ---How far ahead of the vehicle's front the camera goes: about nine seconds of
 ---driving, kept within 30-40m.
@@ -93,11 +110,10 @@ DroneCamCreator.DRIVE_OVER_MAX_CROP = 0.25
 ---underside comes closer than measured.
 DroneCamCreator.DRIVE_OVER_MAX_BUMP = 0.1
 ---Upward raycasts that measure the underside: every PROFILE_STEP metres from
----PROFILE_OVERHANG behind the vehicle to PROFILE_OVERHANG in front, at each
----of the PROFILE_ACROSS offsets from the centre line.
+---PROFILE_OVERHANG behind the vehicle to PROFILE_OVERHANG in front, on every
+---line across the gap between the wheels.
 DroneCamCreator.DRIVE_OVER_PROFILE_STEP = 0.25
 DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG = 1
-DroneCamCreator.DRIVE_OVER_PROFILE_ACROSS = { -0.2, 0, 0.2 }
 ---Something towed behind needs a clear gap in front of it this long, empty
 ---all the way up on the centreline (no drawbar, top link or PTO shaft), to
 ---rise through.
@@ -516,6 +532,65 @@ local function getRowEndProblem(rig, vehicle, distance, speed)
     return nil
 end
 
+---How far either side of the centre line the camera may go: up to the inside
+---of the nearest tyre (front or rear), less room for the lens.
+---@return number
+local function getLineSpan(rig, centreAcross)
+    local span = math.huge
+    for i = 1, #rig.wheels do
+        local wheel = rig.wheels[i]
+        local tyreHalf = math.max(DroneCamCreator.DRIVE_OVER_MIN_TYRE_HALF, wheel.radius * DroneCamCreator.DRIVE_OVER_TYRE_HALF_FACTOR)
+        span = math.min(span, math.abs(wheel.lx - centreAcross) - tyreHalf - DroneCamCreator.DRIVE_OVER_LENS_MARGIN)
+    end
+    if span == math.huge then
+        -- No wheels to go by: keep to the middle half of the vehicle.
+        span = rig.rootHalfWidth * 0.5
+    end
+    return math.max(span, 0)
+end
+
+---Map of the underside: for each line across the gap between the wheels, the
+---lowest clearance along the whole vehicle (and a little past each end).
+---Kept for DRIVE_OVER_GRID_CACHE_TIME, since it takes several hundred rays.
+---@return table|nil @{columns = {{offset, clearance}}, lowest = {clearance, along}}
+local function getUndersideGrid(camera, vehicle, rig, centreAcross, span, vehicleFront)
+    local now = camera.activeTime or 0
+    local cached = camera.undersideGrid
+    if cached ~= nil and cached.vehicle == vehicle and now >= cached.time
+        and now - cached.time < DroneCamCreator.DRIVE_OVER_GRID_CACHE_TIME
+        and math.abs(cached.span - span) < 0.01 and math.abs(cached.front - vehicleFront) < 0.01 then
+        return cached.grid
+    end
+
+    local step = DroneCamCreator.DRIVE_OVER_LINE_STEP
+    local count = math.floor(span / step + 1e-6)
+    local maxHeight = DroneCamCreator.DRIVE_OVER_HEIGHT + DroneCamCreator.DRIVE_OVER_HEADROOM + 1
+    local grid = { columns = {}, lowest = { clearance = math.huge, along = 0 } }
+
+    -- One column beyond the outermost line each side, for the lens's width.
+    for i = -(count + 1), count + 1 do
+        local offset = i * step
+        local column = { offset = offset, clearance = math.huge }
+        local along = rig.rootRear - DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG
+        while along <= vehicleFront + DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG do
+            local x, z = DroneCamRig.toWorld(rig, centreAcross + offset, along)
+            local clearance = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, maxHeight)
+            if clearance == nil then
+                return nil
+            end
+            column.clearance = math.min(column.clearance, clearance)
+            if clearance < grid.lowest.clearance then
+                grid.lowest = { clearance = clearance, along = along }
+            end
+            along = along + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
+        end
+        grid.columns[#grid.columns + 1] = column
+    end
+
+    camera.undersideGrid = { vehicle = vehicle, time = now, span = span, front = vehicleFront, grid = grid }
+    return grid
+end
+
 ---@param forced boolean|string @See getStraightProblem; Ctrl+G (true) also
 ---    skips the row-end check, but nothing that could clip is ever skipped
 ---@return table|nil, string|nil @The plan, or nil and the reason it cannot be done
@@ -544,41 +619,45 @@ local function planDriveOver(camera, vehicle, rig, forced)
         return nil, "implement on the front (header, mower)"
     end
 
-    -- Centred between the rear wheels.
+    -- The camera's line: anywhere between the wheels, wherever the underside
+    -- is highest (beside a drawbar rather than under it), centre preferred.
     local left, right = DroneCamRig.getRearWheel(rig, -1), DroneCamRig.getRearWheel(rig, 1)
     local centreAcross = (left.lx + right.lx) * 0.5
     local function world(across, along)
         return DroneCamRig.toWorld(rig, across, along)
     end
 
-    -- The underside along the camera's line must clear the lens: the whole
-    -- length including anything small on the front, a little past each end
-    -- (weights and hitches stick out past the nominal size), and a little
-    -- either side of the centre.
-    local height = DroneCamCreator.DRIVE_OVER_HEIGHT
-    local needed = height + DroneCamCreator.DRIVE_OVER_HEADROOM
-    local along = rig.rootRear - DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG
-    local lowest, lowestAt = math.huge, nil
-    while along <= vehicleFront + DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG do
-        for _, offset in ipairs(DroneCamCreator.DRIVE_OVER_PROFILE_ACROSS) do
-            local x, z = world(centreAcross + offset, along)
-            local clearance = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, needed + 1)
-            if clearance == nil then
-                return nil, "cannot measure the underside"
-            end
-            if clearance < lowest then
-                lowest, lowestAt = clearance, along
-            end
-        end
-        along = along + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
-    end
-    if lowest < needed then
-        local where = lowestAt > rig.rootFront and "in front of the vehicle"
-            or (lowestAt < rig.rootRear and "behind the vehicle" or ("%.1fm from the front"):format(rig.rootFront - lowestAt))
-        return nil, ("underside too low: %.2fm %s, needs %.2fm"):format(lowest, where, needed)
+    local grid = getUndersideGrid(camera, vehicle, rig, centreAcross, getLineSpan(rig, centreAcross), vehicleFront)
+    if grid == nil then
+        return nil, "cannot measure the underside"
     end
 
-    -- Anything towed needs a clear gap to rise through, and time to do it.
+    -- Each line's clearance is the lowest over the lens's width (its own
+    -- column and the ones either side); best first, the centre winning a
+    -- near tie.
+    local lines = {}
+    for i = 2, #grid.columns - 1 do
+        local clearance = math.min(grid.columns[i - 1].clearance, grid.columns[i].clearance, grid.columns[i + 1].clearance)
+        lines[#lines + 1] = { offset = grid.columns[i].offset, clearance = clearance }
+    end
+    table.sort(lines, function(a, b)
+        if math.abs(a.clearance - b.clearance) > DroneCamCreator.DRIVE_OVER_LINE_TIE then
+            return a.clearance > b.clearance
+        end
+        return math.abs(a.offset) < math.abs(b.offset)
+    end)
+
+    local best = lines[1]
+    if best == nil or best.clearance < DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE then
+        local lowest = grid.lowest
+        local where = lowest.along > rig.rootFront and "in front of the vehicle"
+            or (lowest.along < rig.rootRear and "behind the vehicle" or ("%.1fm from the front"):format(rig.rootFront - lowest.along))
+        return nil, ("underside too low: best line %.2fm (lowest %.2fm %s), needs %.2fm"):format(
+            best ~= nil and best.clearance or 0, lowest.clearance, where, DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE)
+    end
+
+    -- Anything towed needs a clear gap to rise through, and time to do it;
+    -- the line must be clear all the way up through the gap too.
     local towedFront, towedTop = getTowedFront(rig)
     local riseHeight = math.max(towedTop + DroneCamCreator.DRIVE_OVER_RISE_CLEARANCE, DroneCamCreator.DRIVE_OVER_MIN_RISE_HEIGHT)
     local safeDistance = DroneCamCreator.DRIVE_OVER_SAFE_DISTANCE + DroneCamCreator.DRIVE_OVER_SAFE_PER_SPEED * speed
@@ -589,26 +668,53 @@ local function planDriveOver(camera, vehicle, rig, forced)
             return nil, ("implement too close behind to rise between: %.1fm gap, needs %.1fm"):format(gap,
                 DroneCamCreator.DRIVE_OVER_MIN_GAP)
         end
-
-        local riseStart = gap - DroneCamCreator.DRIVE_OVER_REAR_CLEARANCE
-        local climbTime = (riseStart - safeDistance) / speed
-        if climbTime <= 0 or (riseHeight - height) / climbTime > DroneCamCreator.DRIVE_OVER_MAX_CLIMB then
-            return nil, "too fast to rise clear of the towed implement"
-        end
-
-        local a = towedFront + 0.1
-        while a <= rig.rootRear - 0.1 do
-            local x, z = world(centreAcross, a)
-            local clearance = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, riseHeight)
-            if clearance == nil or clearance < riseHeight then
-                return nil, "drawbar or shaft in the gap behind"
-            end
-            a = a + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
-        end
     end
 
+    local chosen, height = nil, nil
+    local gapReason = nil
+    for _, line in ipairs(lines) do
+        if line.clearance < DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE then
+            break
+        end
+        local lineHeight = math.max(math.min(DroneCamCreator.DRIVE_OVER_HEIGHT, line.clearance - DroneCamCreator.DRIVE_OVER_HEADROOM),
+                                    DroneCamCreator.DRIVE_OVER_MIN_HEIGHT)
+        local isClear = true
+
+        if towedFront ~= nil then
+            local gap = rig.rootRear - towedFront
+            local riseStart = gap - DroneCamCreator.DRIVE_OVER_REAR_CLEARANCE
+            local climbTime = (riseStart - safeDistance) / speed
+            if climbTime <= 0 or (riseHeight - lineHeight) / climbTime > DroneCamCreator.DRIVE_OVER_MAX_CLIMB then
+                return nil, "too fast to rise clear of the towed implement"
+            end
+
+            local a = towedFront + 0.1
+            while isClear and a <= rig.rootRear - 0.1 do
+                for _, lens in ipairs({ -DroneCamCreator.DRIVE_OVER_LINE_STEP, 0, DroneCamCreator.DRIVE_OVER_LINE_STEP }) do
+                    local gx, gz = world(centreAcross + line.offset + lens, a)
+                    local clearance = DroneCamSpot.getVehicleClearance(gx, getTerrainHeight(gx, gz, rig.ground), gz, riseHeight)
+                    if clearance == nil or clearance < riseHeight then
+                        isClear = false
+                        gapReason = "drawbar or shaft in the gap behind, on every line"
+                        break
+                    end
+                end
+                a = a + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
+            end
+        end
+
+        if isClear then
+            chosen, height = line, lineHeight
+            break
+        end
+    end
+    if chosen == nil then
+        return nil, gapReason or "no clear line under the vehicle"
+    end
+    local lineAcross = centreAcross + chosen.offset
+
     local spotAlong = vehicleFront + distance
-    local x, z = world(centreAcross, spotAlong)
+    local x, z = world(lineAcross, spotAlong)
     local ground = getTerrainHeight(x, z, rig.ground)
     local y = ground + height
 
@@ -631,7 +737,7 @@ local function planDriveOver(camera, vehicle, rig, forced)
     local step = 2
     local sampled = 0
     while sampled <= distance + 2 do
-        local cx, cz = world(centreAcross, vehicleFront + sampled)
+        local cx, cz = world(lineAcross, vehicleFront + sampled)
         local crop = DroneCamCamera.getCropHeightAt(cx, cz)
         if crop > DroneCamCreator.DRIVE_OVER_MAX_CROP then
             return nil, ("standing crop %.1fm high"):format(crop)
@@ -661,7 +767,10 @@ local function planDriveOver(camera, vehicle, rig, forced)
     return {
         shot = S.SHOT_DRIVE_OVER,
         x = x, y = y, z = z, ground = ground,
-        centreAcross = centreAcross,
+        centreAcross = lineAcross,
+        lineOffset = chosen.offset,
+        underside = chosen.clearance,
+        height = height,
         riseHeight = riseHeight,
         safeDistance = safeDistance,
         phase = "approach",
@@ -1251,7 +1360,8 @@ function DroneCamCreator.getTracking(camera, shot)
         elseif plan.phase == "join" then
             return 0, lerp(close, settings.minClearance, smoothstep(plan.joinTime / DroneCamCreator.DRIVE_OVER_JOIN_TIME))
         end
-        local height = shot == S.SHOT_WHEEL_PASS and DroneCamCreator.WHEEL_PASS_HEIGHT or DroneCamCreator.DRIVE_OVER_HEIGHT
+        local height = shot == S.SHOT_WHEEL_PASS and DroneCamCreator.WHEEL_PASS_HEIGHT
+            or (plan.height or DroneCamCreator.DRIVE_OVER_HEIGHT)
         return 0, height - 0.05
     end
 

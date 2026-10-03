@@ -982,11 +982,22 @@ function DroneCamCamera:updateDebug(dtSeconds, vehicle)
 
     local plan = self.plan
     if self.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan ~= nil and plan.shot == self.shot then
-        self.debugDriveOver = "running (" .. tostring(plan.phase) .. ")"
+        self.debugDriveOver = "running (" .. tostring(plan.phase) .. ") - " .. DroneCamCamera.describeDriveOverLine(plan)
         return
     end
     local found, reason = DroneCamCreator.plan(self, vehicle, DroneCamSettings.SHOT_DRIVE_OVER, false)
-    self.debugDriveOver = found ~= nil and "possible now" or ("not possible: " .. tostring(reason))
+    self.debugDriveOver = found ~= nil and ("possible now - " .. DroneCamCamera.describeDriveOverLine(found))
+        or ("not possible: " .. tostring(reason))
+end
+
+---@return string @The camera height and line a drive-over plan uses, for the overlay
+function DroneCamCamera.describeDriveOverLine(plan)
+    if plan.height == nil then
+        return ""
+    end
+    local offset = plan.lineOffset or 0
+    local line = math.abs(offset) < 0.05 and "on the centre line" or ("%+.2fm off centre"):format(offset)
+    return ("camera %.2fm up, %s, underside %.2fm"):format(plan.height, line, plan.underside or 0)
 end
 
 ---Lines for the debug overlay: the shot on screen, the field, why the
@@ -1389,7 +1400,9 @@ function DroneCamCamera:applyHardFloors(vehicle, isGroundLow, isUnderVehicle)
     local ground = getTerrainHeightAt(self.posX, self.posZ)
     local groundClearance = DroneCamCamera.HARD_GROUND_CLEARANCE
     if isGroundLow then
-        groundClearance = DroneCamCreator.DRIVE_OVER_HEIGHT - 0.05
+        -- The drive-over may have brought the camera down to suit a low underside.
+        local height = self.plan ~= nil and self.plan.height or DroneCamCreator.DRIVE_OVER_HEIGHT
+        groundClearance = math.min(height, DroneCamCreator.DRIVE_OVER_HEIGHT) - 0.05
     end
     self.posY = math.max(self.posY, ground + groundClearance)
 

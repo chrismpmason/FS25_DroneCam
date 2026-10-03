@@ -1800,6 +1800,16 @@ local SOLO_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.whe
 -- The same with front weights hanging down to 0.45m.
 local LOW_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
                       bodies = { BODY, { -0.5, 0.5, 0.45, 1.0, 2.2, 2.8 } } }
+-- Too low anywhere between the wheels: 0.30m all across.
+local VERY_LOW_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                           bodies = { { -1.0, 1.0, 0.30, 3.0, -2.5, 2.5 } } }
+-- Low all across, but enough: the camera comes down to suit.
+local LOWISH_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                         bodies = { { -1.0, 1.0, 0.42, 3.0, -2.5, 2.5 } } }
+-- Your trailer case: a hitch at 0.53m on the centre line at the back of the
+-- tractor (5m from the front), the rest of the underside at 0.65m.
+local HITCH_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                        bodies = { BODY, { -0.15, 0.15, 0.53, 1.0, -3.0, -2.0 } } }
 -- Trailed kit 4.5m behind, nothing on the centreline in between.
 local TOWED = { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
                 bodies = { { -2, 2, 0.3, 1.6, -11, -7 } } }
@@ -1896,17 +1906,26 @@ tick(3, true)
 check("offered again once straight", available())
 
 startOn(LOW_TRACTOR)
-check("not offered when the tractor sits too low", not available())
+check("front weights down to 0.45m: offered, with the camera brought down to suit", available())
 startOn(MOUNTED)
 check("not offered with a mounted implement (no room to rise)", not available())
 startOn(TRAILED_DRAWBAR)
-check("not offered with a drawbar down the middle", not available())
+check("a drawbar down the middle: offered, on a line beside it", available())
 -- A shaft or top link high in the middle of the gap: the underside of the
 -- tractor is fine, but there is no clear way up between tractor and kit.
 startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
           implements = { { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
                            bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -0.1, 0.1, 1.0, 1.2, -6, -4 } } } } })
-check("not offered with a shaft across the gap above", not available())
+check("a shaft high in the gap: offered, rising beside it", available())
+-- A frame right across the gap, 1.0-1.2m up: the tractor's underside is fine,
+-- but there is no line to rise up through.
+startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+          implements = { { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
+                           bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -1.5, 1.5, 1.0, 1.2, -6, -4 } } } } })
+camera.planCache = {}
+local _, frameWhy = DroneCamCreator.plan(camera, vehicle, DRIVE_OVER, false)
+check("a frame across the whole gap: not offered, and says why",
+      (frameWhy or ""):find("drawbar or shaft in the gap behind, on every line", 1, true) ~= nil, frameWhy)
 startOn(TRAILED_CLEAR)
 check("offered with trailed kit and a clear gap", available())
 startOn(COMBINE_BODY)
@@ -1951,7 +1970,7 @@ local function flyDriveOver(spec, speed)
             r.swingYaw = r.swingYaw + math.deg(wrapAngle(ry - pry))
         end
         if (phase == "under" or phase == "swing") then
-            r.lowError = math.max(r.lowError, math.abs(y - TERRAIN_HEIGHT - 0.3))
+            r.lowError = math.max(r.lowError, math.abs(y - TERRAIN_HEIGHT - (p.height or 0.3)))
             if NEAR_CLIP > 0.05 + 1e-9 then r.clipOk = false end
         end
         for _, b in ipairs(VEHICLE_BODIES) do r.closest = math.min(r.closest, boxDistance(x, y, z, b)) end
@@ -2088,12 +2107,13 @@ local function reasonFor(spec, setup)
 end
 local function says(reason, text) return reason:find(text, 1, true) ~= nil end
 
-local _, why = reasonFor(LOW_TRACTOR)
-check("too low: says so, and where", says(why, "underside too low") and says(why, "needs 0.55m"), why)
+local _, why = reasonFor(VERY_LOW_TRACTOR)
+check("too low on every line: says so, and where", says(why, "underside too low: best line 0.30m") and says(why, "needs 0.35m"), why)
 _, why = reasonFor(MOUNTED)
 check("mounted implement: says there is no room to rise", says(why, "implement too close behind"), why)
-_, why = reasonFor(TRAILED_DRAWBAR)
-check("drawbar: says so", says(why, "underside too low") or says(why, "drawbar"), why)
+local drawbarPlan = reasonFor(TRAILED_DRAWBAR)
+check("drawbar: the camera goes beside it, not under it", drawbarPlan ~= nil and math.abs(drawbarPlan.lineOffset) >= 0.2,
+      drawbarPlan and tostring(drawbarPlan.lineOffset))
 _, why = reasonFor(COMBINE_BODY)
 check("header: says so", says(why, "implement on the front"), why)
 _, why = reasonFor(SOLO_TRACTOR, function(undo) CROP_AT = undo and function() return 0, 0 end or function() return 1, 5 end end)
@@ -2123,7 +2143,7 @@ if weightPlan ~= nil then
     check("the 30-40m is measured from the weights, not the bonnet", spotAlong - 3.6 >= 30 - 0.01, ("%.1f"):format(spotAlong))
 end
 _, why = reasonFor(WITH_LOW_WEIGHT)
-check("front weights hanging too low do, and it says so", says(why, "underside too low") and says(why, "in front of the vehicle"), why)
+local lowWeightPlan = reasonFor(WITH_LOW_WEIGHT)
 
 -- The test tractor does not follow the terrain, so the slope starts just
 -- ahead of it and runs on past the spot.
@@ -2143,6 +2163,47 @@ _, why = reasonFor(SOLO_TRACTOR, function(undo)
 end)
 check("a bump where the camera sits is not, and it says so", says(why, "ground not even"), why)
 
+print("\n-- drive-over: adaptive clearance --")
+local hitchPlan, hitchWhy = reasonFor(HITCH_TRACTOR)
+check("a 0.53m hitch on the centre line no longer rules it out", hitchPlan ~= nil, hitchWhy)
+check("the camera moves to a line beside the hitch", hitchPlan ~= nil and math.abs(hitchPlan.lineOffset) >= 0.25
+      and math.abs(hitchPlan.height - 0.3) < 1e-6, hitchPlan and DroneCamCamera.describeDriveOverLine(hitchPlan))
+check("and stays inside the tyres", hitchPlan ~= nil and math.abs(hitchPlan.lineOffset) <= 0.57 + 1e-6)
+
+local lowishPlan, lowishWhy = reasonFor(LOWISH_TRACTOR)
+check("0.42m all across: the camera comes down to 0.22m", lowishPlan ~= nil and math.abs(lowishPlan.height - 0.22) < 1e-6
+      and math.abs(lowishPlan.lineOffset) < 1e-6, lowishPlan and DroneCamCamera.describeDriveOverLine(lowishPlan) or lowishWhy)
+local nearMin = reasonFor({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                            bodies = { { -1.0, 1.0, 0.36, 3.0, -2.5, 2.5 } } })
+check("0.36m: still offered, camera at 0.16m", nearMin ~= nil and math.abs(nearMin.height - 0.16) < 1e-6)
+local _, belowMin = reasonFor({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                                bodies = { { -1.0, 1.0, 0.34, 3.0, -2.5, 2.5 } } })
+check("0.34m: under the 0.35m minimum, turned down", says(belowMin, "underside too low"), belowMin)
+
+-- In flight with the camera lowered.
+local lowFlight = flyDriveOver(LOWISH_TRACTOR)
+check("lowered drive-over runs", lowFlight ~= nil and lowFlight.done)
+if lowFlight ~= nil then
+    check("sits at its lowered height as the tractor passes", lowFlight.lowError < 0.01, ("off by %.3fm"):format(lowFlight.lowError))
+    check("never touches the low underside", lowFlight.closest >= 0.15, ("%.2fm"):format(lowFlight.closest))
+end
+
+-- And beside the hitch.
+local hitchFlight = flyDriveOver(HITCH_TRACTOR)
+check("drive-over beside the hitch runs", hitchFlight ~= nil and hitchFlight.done)
+if hitchFlight ~= nil then
+    check("never touches the hitch", hitchFlight.closest >= 0.15, ("%.2fm"):format(hitchFlight.closest))
+end
+
+startOn(LOWISH_TRACTOR)
+DroneCam.settings.showDebug = true
+tick(1.2, true)
+RENDERED = {}
+DroneCam:draw()
+local overlay = table.concat(RENDERED, "\n")
+check("the overlay shows the chosen height and line", says(overlay, "possible now - camera 0.22m up, on the centre line"), overlay)
+DroneCam.settings.showDebug = false
+
 print("\n-- drive-over: nothing lifts the camera off the ground --")
 startOn(SOLO_TRACTOR)
 local stayedDown, ran, worst = true, false, 0
@@ -2158,7 +2219,7 @@ if available() then
         if phase == "under" or phase == "swing" then
             ran = true
             local _, y = getWorldTranslation(cn)
-            worst = math.max(worst, math.abs(y - TERRAIN_HEIGHT - 0.3))
+            worst = math.max(worst, math.abs(y - TERRAIN_HEIGHT - (p.height or 0.3)))
         end
     end)
     RAYCAST_HIT = false
