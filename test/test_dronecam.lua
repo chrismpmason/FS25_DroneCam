@@ -43,7 +43,13 @@ function unlink(node) nodes[node].parent = nil end
 function delete(node) nodes[node] = nil end
 function setFastShadowUpdate() end
 function setFovY(node, rad) assert(nodes[node], "setFovY on dead node") end
-function entityExists(node) return nodes[node] ~= nil end
+function entityExists(node) return nodes[node] ~= nil or BODY_NAMES[node] ~= nil end
+-- Names of collision shapes hit by raycasts (ids from BODY_ID_BASE up), and
+-- of nodes; parents of nodes.
+BODY_NAMES = {}
+BODY_ID_BASE = 1000000
+function getName(node) return BODY_NAMES[node] or (nodes[node] and nodes[node].name) or "" end
+function getParent(node) return nodes[node] and nodes[node].parent or 0 end
 
 function setWorldTranslation(node, x, y, z)
     assert(nodes[node], "translate on dead node")
@@ -111,7 +117,12 @@ end
 -- Collision bodies of the vehicle being driven, as world boxes rebuilt every
 -- tick from vehicle.bodies. They carry the VEHICLE flag; OBSTACLES carry
 -- STATIC_OBJECT. Raycasts only hit what their mask includes.
+-- A body may be crude = true (collision only: a mod's rough box, not the
+-- real model) or visual = true (the real model where the collision is
+-- crude: raycasts miss it). VEHICLE_SOLIDS is what the camera must never
+-- touch: everything but the crude collision.
 VEHICLE_BODIES = {}
+VEHICLE_SOLIDS = {}
 
 function maskHas(mask, flag)
     return math.floor(mask / flag) % 2 == 1
@@ -133,7 +144,7 @@ function RaycastUtil.raycastClosest(x, y, z, dx, dy, dz, maxDistance, mask)
         end
     end
     consider(OBSTACLES, CollisionFlag.STATIC_OBJECT, 500)
-    consider(VEHICLE_BODIES, CollisionFlag.VEHICLE, 900)
+    consider(VEHICLE_BODIES, CollisionFlag.VEHICLE, BODY_ID_BASE)
     if best ~= nil then return bestId, x + dx * best, y + dy * best, z + dz * best, best end
     return nil
 end
@@ -228,6 +239,8 @@ function setXMLFloat(id, k, v) CURRENT[k] = v end
 function getXMLBool(id, k) return CURRENT[k] end
 function getXMLInt(id, k) return CURRENT[k] end
 function getXMLFloat(id, k) return CURRENT[k] end
+function setXMLString(id, k, v) CURRENT[k] = v end
+function getXMLString(id, k) return CURRENT[k] end
 
 local listeners = {}
 function addModEventListener(l) listeners[#listeners + 1] = l end
@@ -313,7 +326,7 @@ local function tick(seconds, working, headingRate, onStep)
 
             -- Collision bodies {minAcross, maxAcross, minY, maxY, minAlong,
             -- maxAlong} as world boxes (bounding the rotated box).
-            VEHICLE_BODIES = {}
+            VEHICLE_BODIES, VEHICLE_SOLIDS, BODY_NAMES = {}, {}, {}
             local c, s = math.cos(heading), math.sin(heading)
             for _, b in ipairs(vehicle.bodies or {}) do
                 local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
@@ -324,7 +337,12 @@ local function tick(seconds, working, headingRate, onStep)
                         minX, maxX, minZ, maxZ = math.min(minX, wx), math.max(maxX, wx), math.min(minZ, wz), math.max(maxZ, wz)
                     end
                 end
-                VEHICLE_BODIES[#VEHICLE_BODIES + 1] = { minX, maxX, root.y + b[3], root.y + b[4], minZ, maxZ }
+                local world = { minX, maxX, root.y + b[3], root.y + b[4], minZ, maxZ }
+                if not b.visual then
+                    VEHICLE_BODIES[#VEHICLE_BODIES + 1] = world
+                    BODY_NAMES[BODY_ID_BASE + #VEHICLE_BODIES] = b.name or "body"
+                end
+                if not b.crude then VEHICLE_SOLIDS[#VEHICLE_SOLIDS + 1] = world end
             end
 
             if working then
@@ -1076,6 +1094,7 @@ local function makeRig(spec)
         -- game reports: lowered (if it can say), fold time (if it folds).
         -- Read live from the spec, so a test can fold or lower it mid-pass.
         for name, value in pairs(imp.specs or {}) do child[name] = value end
+        child.configFileName = imp.configFileName
         local parent = imp.attachedTo ~= nil and children[imp.attachedTo] or v
         function child:getAttacherVehicle() return parent end
         if imp.lowered ~= nil then
@@ -2012,7 +2031,7 @@ local function flyDriveOver(spec, speed, onFrame)
             r.lowError = math.max(r.lowError, math.abs(y - TERRAIN_HEIGHT - (p.height or 0.3)))
             if NEAR_CLIP > 0.05 + 1e-9 then r.clipOk = false end
         end
-        for _, b in ipairs(VEHICLE_BODIES) do r.closest = math.min(r.closest, boxDistance(x, y, z, b)) end
+        for _, b in ipairs(VEHICLE_SOLIDS) do r.closest = math.min(r.closest, boxDistance(x, y, z, b)) end
         local rigNow = DroneCamRig.measure(vehicle, heading)
         if phase == "under" and r.runUp == nil and p.underStart ~= nil then
             r.runUp = p.underStart - rigNow.rootFront
@@ -2029,12 +2048,12 @@ local function flyDriveOver(spec, speed, onFrame)
         end
         if onFrame ~= nil and p ~= nil then onFrame(p, phase, rigNow) end
         if phase ~= nil then
-            for _, b in ipairs(VEHICLE_BODIES) do r.closestOn = math.min(r.closestOn or math.huge, boxDistance(x, y, z, b)) end
+            for _, b in ipairs(VEHICLE_SOLIDS) do r.closestOn = math.min(r.closestOn or math.huge, boxDistance(x, y, z, b)) end
         elseif lastPhase ~= nil and r.firstOff == nil then
             -- The first frame of whatever comes next: how far from the kit,
             -- whether it is gliding, and how far from where the shot wants it.
             r.firstOff = math.huge
-            for _, b in ipairs(VEHICLE_BODIES) do r.firstOff = math.min(r.firstOff, boxDistance(x, y, z, b)) end
+            for _, b in ipairs(VEHICLE_SOLIDS) do r.firstOff = math.min(r.firstOff, boxDistance(x, y, z, b)) end
             r.firstOffGliding = camera.fromPose ~= nil
             local wx, wy, wz = camera:getShotTransform(vehicle)
             -- (Higher is allowed: the floors may lift it over something.)
@@ -2159,7 +2178,7 @@ end
 local function says(reason, text) return reason:find(text, 1, true) ~= nil end
 
 local _, why = reasonFor(VERY_LOW_TRACTOR)
-check("too low on every line: says so, and where", says(why, "underside too low: best line 0.30m") and says(why, "needs 0.35m"), why)
+check("too low on every line: says so, and where", says(why, "underside too low: best line 0.30m") and says(why, "needs 0.32m"), why)
 _, why = reasonFor(MOUNTED)
 check("mounted cultivator: says it is on the ground", says(why, "implement on the ground"), why)
 local drawbarPlan = reasonFor(TRAILED_DRAWBAR)
@@ -2228,8 +2247,12 @@ local nearMin = reasonFor({ width = 2.6, length = 5, height = 3, wheels = TRACTO
                             bodies = { { -1.0, 1.0, 0.36, 3.0, -2.5, 2.5 } } })
 check("0.36m: still offered, camera at 0.16m", nearMin ~= nil and math.abs(nearMin.height - 0.16) < 1e-6)
 local _, belowMin = reasonFor({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
-                                bodies = { { -1.0, 1.0, 0.34, 3.0, -2.5, 2.5 } } })
-check("0.34m: under the 0.35m minimum, turned down", says(belowMin, "underside too low"), belowMin)
+                                bodies = { { -1.0, 1.0, 0.31, 3.0, -2.5, 2.5 } } })
+check("0.31m: under the 0.32m minimum, turned down", says(belowMin, "underside too low"), belowMin)
+local lowest = reasonFor({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                           bodies = { { -1.0, 1.0, 0.32, 3.0, -2.5, 2.5 } } })
+check("0.32m: offered, the camera down to its lowest, 0.12m", lowest ~= nil and math.abs(lowest.height - 0.12) < 1e-6,
+      lowest and DroneCamCamera.describeDriveOverLine(lowest))
 
 -- In flight with the camera lowered.
 local lowFlight = flyDriveOver(LOWISH_TRACTOR)
@@ -2270,7 +2293,10 @@ do
     local TWO = tractorWith(trailerAt(-9, 0.6), trailerAt(-15, 0.6, 2))
     local twoPlan, twoWhy = reasonFor(TWO)
     check("two trailers: offered when both clear", twoPlan ~= nil, twoWhy)
-    local _, lowSecond = reasonFor(tractorWith(trailerAt(-9, 0.6), trailerAt(-15, 0.3, 2)))
+    -- A belly 0.3m up on the second trailer, well away from its axle.
+    local lowBelly = trailerAt(-15, 0.6, 2)
+    lowBelly.bodies[#lowBelly.bodies + 1] = { -1.25, 1.25, 0.3, 0.9, -16.8, -16.2 }
+    local _, lowSecond = reasonFor(tractorWith(trailerAt(-9, 0.6), lowBelly))
     check("the second trailer too low: turned down, and says it is the trailer",
           says(lowSecond, "underside too low") and says(lowSecond, "under the trailer"), lowSecond)
     local _, narrow = reasonFor(tractorWith(trailerAt(-9, 0.6, nil, { { across = 0.3, along = -9, radius = 0.4 } })))
@@ -2419,8 +2445,133 @@ do
     RENDERED = {}
     DroneCam:draw()
     local trainLine = table.concat(RENDERED, "\n")
-    check("the overlay lists the train", says(trainLine, "Train: vehicle, sprayer (fold 1.00)"), trainLine)
+    check("the overlay lists the train", says(trainLine, "Train: vehicle, sprayer [?] (lowered n/a, fold 1.00)"), trainLine)
     DroneCam.settings.showDebug = false
+end
+
+print("\n-- drive-over: rough collision, the allow list --")
+do
+    local logLines = {}
+    local realPrint = print
+    print = function(text, ...)
+        if type(text) == "string" and text:sub(1, 10) == "[DroneCam]" then logLines[#logLines + 1] = text end
+        return realPrint(text, ...)
+    end
+    local function loggedLine(text)
+        for _, line in ipairs(logLines) do
+            if line:find(text, 1, true) ~= nil then return line end
+        end
+        return nil
+    end
+    local function tractorWith(...)
+        return { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { ... } }
+    end
+    -- A tandem-axle tipper 6m long, axles 1.2m apart, hubs 0.5m up.
+    local TANDEM = { { across = 0.95, along = -9.4, radius = 0.5 }, { across = 0.95, along = -10.6, radius = 0.5 } }
+    local function axles(extra)
+        return { { -1.25, 1.25, 0.45, 0.55, -9.46, -9.34, name = "axleFront", visual = extra },
+                 { -1.25, 1.25, 0.45, 0.55, -10.66, -10.54, name = "axleRear", visual = extra } }
+    end
+    local function tipper(file, bodies)
+        return { along = -10, width = 2.5, length = 6, height = 2.6, noWork = true, specs = { spec_trailer = {} },
+                 lowered = true, configFileName = file, wheels = TANDEM, bodies = bodies }
+    end
+
+    -- Base game: tidy collision, a chassis and each axle at hub height.
+    local baseBodies = axles(false)
+    table.insert(baseBodies, 1, { -1.2, 1.2, 0.95, 2.6, -13, -7, name = "chassis" })
+    local BASE = tipper("data/vehicles/brand/tipper/tipper.xml", baseBodies)
+    logLines = {}
+    local basePlan, baseWhy = reasonFor(tractorWith(BASE))
+    check("base-game tipper: a drive-over", basePlan ~= nil, baseWhy)
+    local baseLog = loggedLine("[DroneCam] Underside: lowest collision 0.45m, shape 'axle")
+    check("logs the lowest collision shape by name, and its height", baseLog ~= nil, table.concat(logLines, " | "))
+    local baseFlight = flyDriveOver(tractorWith(BASE))
+    check("base-game tipper: the run completes, clear of every axle", baseFlight ~= nil and baseFlight.done
+          and baseFlight.closest >= 0.12, baseFlight and ("%.2fm"):format(baseFlight.closest))
+
+    -- A mod with crude collision: one box round both axles and all four
+    -- wheels, down to 0.26m; the real axles are at hub height.
+    local crudeBodies = axles(true)
+    table.insert(crudeBodies, 1, { -1.25, 1.25, 0.9, 2.6, -13, -7, name = "collision" })
+    table.insert(crudeBodies, 2, { -1.25, 1.25, 0.26, 0.9, -11.1, -8.9, name = "collision", crude = true })
+    local MOD = tipper("C:/Users/x/Documents/My Games/FarmingSimulator2025/mods/FS25_CrudeTipper/xml/tipper.xml", crudeBodies)
+    logLines = {}
+    local modPlan, modWhy = reasonFor(tractorWith(MOD))
+    check("mod tipper with a crude box round the axles: a drive-over", modPlan ~= nil, modWhy)
+    check("the camera stays clear of the wheel paths", modPlan ~= nil and math.abs(modPlan.lineOffset) <= 0.95 - 0.4 + 1e-6)
+    local modLog = loggedLine("[DroneCam] Underside: lowest collision 0.26m, shape 'collision'")
+    check("logs the crude box as the lowest reading, and that the hub height was used instead",
+          modLog ~= nil and modLog:find("counted as 0.50m (low reading on the axle line: hub height used)", 1, true) ~= nil,
+          modLog or table.concat(logLines, " | "))
+    local modFlight = flyDriveOver(tractorWith(MOD))
+    check("mod tipper: the run completes", modFlight ~= nil and modFlight.done)
+    check("and never touches the real axles or body", modFlight ~= nil and modFlight.closest >= 0.12,
+          modFlight and ("%.2fm"):format(modFlight.closest))
+
+    -- On the tractor (where the axle line is not second-guessed) only a
+    -- shape named as an axle is taken at hub height.
+    local function tractorAxle(name)
+        return { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                 bodies = { BODY, { -0.9, 0.9, 0.25, 0.35, -1.3, -1.1, name = name } } }
+    end
+    local namedPlan, namedWhy = reasonFor(tractorAxle("rearAxle_col"))
+    check("a low shape named as an axle: taken at hub height, offered", namedPlan ~= nil, namedWhy)
+    local _, unnamedWhy = reasonFor(tractorAxle("bellyPan"))
+    check("the same shape not named as one: turned down", says(unnamedWhy, "underside too low"), unnamedWhy)
+
+    -- Box collision all the way along, 0.2m up: nothing says it is wrong,
+    -- so it is turned down, with how to allow it.
+    local boxBodies = axles(true)
+    table.insert(boxBodies, 1, { -1.25, 1.25, 0.2, 2.6, -13, -7, name = "collision", crude = true })
+    table.insert(boxBodies, 2, { -1.2, 1.2, 0.95, 2.6, -13, -7, name = "chassis", visual = true })
+    local BOXY = tipper("C:/Users/x/Documents/My Games/FarmingSimulator2025/mods/FS25_BoxTrailer/xml/trailer.xml", boxBodies)
+    local _, boxWhy = reasonFor(tractorWith(BOXY))
+    check("box collision all along: turned down, says how to allow it",
+          says(boxWhy, "under the trailer") and says(boxWhy, "add FS25_BoxTrailer/xml/trailer.xml to driveOverAllow in modSettings/FS25_DroneCam.xml"),
+          boxWhy)
+    DroneCam.settings.driveOverAllow = { "FS25_BoxTrailer" }
+    local allowedPlan, allowedWhy = reasonFor(tractorWith(BOXY))
+    check("on the allow list (by mod name): a drive-over", allowedPlan ~= nil, allowedWhy)
+    local allowedFlight = flyDriveOver(tractorWith(BOXY))
+    check("and it runs, clear of the real axles and body", allowedFlight ~= nil and allowedFlight.done
+          and allowedFlight.closest >= 0.12, allowedFlight and ("%.2fm"):format(allowedFlight.closest))
+    local BALER = { along = -6, width = 2.8, length = 4, height = 3, workWidth = 2.2, workDepth = 1,
+                    specs = { spec_baler = {} }, lowered = false, configFileName = "C:/Games/mods/FS25_Baler/baler.xml",
+                    bodies = { { -1.4, 1.4, 0.9, 3, -8, -4 } } }
+    DroneCam.settings.driveOverAllow = { "FS25_Baler/baler.xml" }
+    check("the allow list overrides the kind of implement too", reasonFor(tractorWith(BALER)) ~= nil)
+    DroneCam.settings.driveOverAllow = {}
+    check("and only while it is on the list", reasonFor(tractorWith(BALER)) == nil)
+
+    check("vehicle key: a mod's file from its mod folder on",
+          DroneCamKit.getVehicleKey({ configFileName = "C:\\Users\\x\\Documents\\My Games\\FarmingSimulator2025\\mods\\FS25_X\\xml\\t.xml" })
+          == "FS25_X/xml/t.xml")
+    check("vehicle key: a base-game file as it is",
+          DroneCamKit.getVehicleKey({ configFileName = "data/vehicles/krone/tx460/tx460.xml" }) == "data/vehicles/krone/tx460/tx460.xml")
+    check("allow list matches the end of the file, not part of a name",
+          DroneCamKit.getIsAllowed({ configFileName = "data/vehicles/krone/tx460/tx460.xml" }, { "tx460.xml" })
+          and not DroneCamKit.getIsAllowed({ configFileName = "data/vehicles/krone/tx460/tx460.xml" }, { "460.xml" }))
+
+    -- Kept in modSettings with everything else.
+    DroneCam.settings.driveOverAllow = { "FS25_BoxTrailer", "data/vehicles/krone/tx460/tx460.xml" }
+    DroneCamSettings.store(DroneCam.settings)
+    local reread = DroneCamSettings.new()
+    DroneCamSettings.restore(reread)
+    check("the allow list is saved and read back", #reread.driveOverAllow == 2 and reread.driveOverAllow[1] == "FS25_BoxTrailer"
+          and reread.driveOverAllow[2] == "data/vehicles/krone/tx460/tx460.xml")
+    DroneCam.settings.driveOverAllow = {}
+    DroneCamSettings.store(DroneCam.settings)
+
+    -- The overlay: lowered only where it decides anything.
+    local MOWER = { along = -3.5, width = 3, length = 1.5, height = 1.2, workWidth = 3, workDepth = 1,
+                    specs = { spec_mower = {} }, lowered = true, bodies = { { -1.5, 1.5, 0.9, 1.2, -4.2, -2.8 } } }
+    startOn(tractorWith(MOWER, BASE))
+    local listed = DroneCamKit.describe(vehicle, DroneCamRig.measure(vehicle, heading), {})
+    check("overlay: a plain trailer's lowered state is n/a", says(listed, "trailer [data/vehicles/brand/tipper/tipper.xml] (lowered n/a)"), listed)
+    check("overlay: a mower's is shown", says(listed, "mower [?] (lowered yes)"), listed)
+
+    print = realPrint
 end
 
 print("\n-- drive-over: nothing lifts the camera off the ground --")
@@ -2604,7 +2755,7 @@ local function driveMode(seconds, headingRate, record)
             if DroneCamCreator.getIsGroundPass(camera.shot) then record.passes[#record.passes + 1] = camera.shot end
             lastShot = camera.shot
         end
-        for _, b in ipairs(VEHICLE_BODIES) do record.closest = math.min(record.closest, boxDistance(x, y, z, b)) end
+        for _, b in ipairs(VEHICLE_SOLIDS) do record.closest = math.min(record.closest, boxDistance(x, y, z, b)) end
         local p = camera.plan
         -- While the vehicle goes by (on the approach the camera may still be
         -- settling from the shot before).

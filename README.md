@@ -23,10 +23,39 @@ that cuts between those, five close-ups and nine creator shots:
   straight run with no headland coming, at 7 km/h or more, out of tall
   standing crop, not under trees, on even ground (a steady slope is fine, a
   bump is not), and when raycasts against the collision of the whole train
-  find a line between the wheels with at least 0.35m clear underneath, front
+  find a line between the wheels with at least 0.32m clear underneath, front
   to back. The camera takes the line with the most room (beside a drawbar or
   hitch rather than under it, never in the track of a towed unit's wheels)
-  and comes down to 0.2m below the underside, never lower than 0.15m.
+  and comes down to 0.2m below the underside, never lower than 0.12m.
+
+  Mod collision is often rough, so a low reading isn't taken at face value
+  everywhere. Any shape whose name (or a parent's) says wheel, tyre, hub or
+  axle counts at hub height. So does any reading under a towed unit's axles
+  that is lower than its hubs: an axle runs at hub height, so anything lower
+  there is the collision, not the trailer. Each axle line gets its own rays,
+  so a thin axle can't slip between them. The lowest collision shape found
+  (name, node, height, where, and what it was counted as) goes into
+  `log.txt` as a `[DroneCam] Underside:` line and onto the Ctrl+Shift+D
+  overlay.
+
+  If a vehicle is still turned down and you know it clears, put it on the
+  allow list in `modSettings/FS25_DroneCam.xml`. The overlay's "Train:" line
+  and the rejection message both give the name to use:
+
+  ```xml
+  <droneCam>
+      ...
+      <driveOverAllow>
+          <vehicle xmlFilename="FS25_SomeTrailer/xml/trailer.xml"/>
+          <vehicle xmlFilename="FS25_AnotherMod"/>
+      </driveOverAllow>
+  </droneCam>
+  ```
+
+  An entry can be the whole name, the end of it after a slash, or just the
+  mod's folder name. A vehicle on the list always gets the drive-over, whatever
+  kind of implement it is. Its collision is trusted no lower than its hubs (or
+  ignored if it has no wheels). Edit the file with the game closed.
 
   What is attached decides whether it may try at all:
 
@@ -184,7 +213,9 @@ of the vehicle, smoothness and zoom, the drive-over (every reason to skip it,
 then full runs over a tractor with a real collision underside, one and two
 trailers, a sprayer with its boom down and a combine with its header raised,
 checked every frame for distance to every collision body; the rule for each
-kind of implement; kit folding or lowering mid-pass), combine
+kind of implement; kit folding or lowering mid-pass; a base-game tipper and
+a mod tipper with crude box collision round its axles, and the allow list),
+combine
 and hired-helper detection, settings round-tripping, and every path that must
 return the player to their own camera.
 

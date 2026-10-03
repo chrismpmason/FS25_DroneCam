@@ -158,8 +158,17 @@ local function getWheels(rig, vehicle)
             local x, y, z = getWorldTranslation(node)
             local lx, lz = DroneCamRig.toLocal(rig, x, z)
             local radius = (wheel.physics ~= nil and wheel.physics.radius) or wheel.radius or 0.5
+            -- The axle runs at hub height: the wheel centre above the ground.
+            local hub = y - DroneCamRig.getGroundHeight(x, z, y - radius)
 
-            wheels[#wheels + 1] = { lx = lx, lz = lz, y = y, radius = radius }
+            wheels[#wheels + 1] = { lx = lx, lz = lz, y = y, radius = radius, hub = hub, vehicle = vehicle }
+
+            -- Every node of the wheel, so a raycast hitting it is known for one.
+            for _, part in ipairs({ wheel.node, wheel.repr, wheel.driveNode, wheel.linkNode }) do
+                if part ~= nil and part ~= 0 then
+                    rig.wheelNodes[part] = true
+                end
+            end
         end
     end
 
@@ -183,7 +192,8 @@ function DroneCamRig.measure(vehicle, heading)
         fwdX = fwdX, fwdZ = fwdZ,
         sideX = fwdZ, sideZ = -fwdX,
         ground = DroneCamRig.getGroundHeight(x, z, y),
-        boxes = {}
+        boxes = {},
+        wheelNodes = {}
     }
 
     local vehicles = vehicle.getChildVehicles ~= nil and vehicle:getChildVehicles() or { vehicle }

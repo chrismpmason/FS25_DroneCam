@@ -100,6 +100,7 @@ end
 ---upward raycast against vehicle collision.
 ---@param maxHeight number @How far up to look
 ---@return number|nil @Clearance in metres, maxHeight if nothing is there, nil if raycasts are unavailable
+---@return integer|nil @The collision shape it hit, if any
 function DroneCamSpot.getVehicleClearance(x, groundY, z, maxHeight)
     if RaycastUtil == nil or RaycastUtil.raycastClosest == nil or CollisionFlag == nil then
         return nil
@@ -108,9 +109,9 @@ function DroneCamSpot.getVehicleClearance(x, groundY, z, maxHeight)
     local start = 0.02
     local hitId, _, _, _, distance = RaycastUtil.raycastClosest(x, groundY + start, z, 0, 1, 0, maxHeight, CollisionFlag.VEHICLE)
     if hitId == nil or hitId == 0 or distance == nil then
-        return maxHeight
+        return maxHeight, nil
     end
-    return distance + start
+    return distance + start, hitId
 end
 
 ---@return boolean @A clear spot with a clear view of the target

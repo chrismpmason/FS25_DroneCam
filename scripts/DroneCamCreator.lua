@@ -80,9 +80,13 @@ DroneCamCreator.DRIVE_OVER_HEIGHT = 0.3
 ---plane is pulled in to 0.05m for the shot).
 DroneCamCreator.DRIVE_OVER_HEADROOM = 0.2
 ---The camera comes down to suit a lower underside (underside minus HEADROOM),
----but no lower than this; a line with less than MIN_CLEARANCE is not used.
-DroneCamCreator.DRIVE_OVER_MIN_HEIGHT = 0.15
-DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE = 0.35
+---but no lower than this; a line with less than MIN_CLEARANCE (the lowest
+---camera plus its headroom) is not used.
+DroneCamCreator.DRIVE_OVER_MIN_HEIGHT = 0.12
+DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE = DroneCamCreator.DRIVE_OVER_MIN_HEIGHT + DroneCamCreator.DRIVE_OVER_HEADROOM
+---A collision shape hit underneath whose name (or a parent's) has one of
+---these in it is a wheel or axle: it is taken at hub height.
+DroneCamCreator.WHEEL_SHAPE_WORDS = { "wheel", "tire", "tyre", "axle", "hub" }
 ---Lines are tried every LINE_STEP across the gap between the wheels; the lens
 ---takes up a line and its neighbours either side. Lines within LINE_TIE of
 ---the best clearance count as equal, and the most central of them is used.
@@ -478,10 +482,10 @@ local function getUnitAt(rig, along)
 end
 
 ---@return string|nil @Why what is attached rules out a drive-over, or nil
-local function getKitProblem(rig)
+local function getKitProblem(camera, rig)
     return DroneCamKit.getDriveOverProblem(rig, function(box)
         return getIsSmallFront(rig, box)
-    end)
+    end, camera.settings ~= nil and camera.settings.driveOverAllow or nil)
 end
 
 ---Checks the run is straight, by whichever rules apply.
@@ -569,11 +573,120 @@ local function getIsLineOnTrainWheels(rig, across)
     return false
 end
 
+---@return number @How far a box reaches along the rig's forward axis from its centre
+local function getAlongExtent(rig, box)
+    return math.abs(box.fx * rig.fwdX + box.fz * rig.fwdZ) * box.halfLength
+        + math.abs(box.sx * rig.fwdX + box.sz * rig.fwdZ) * box.halfWidth
+end
+
+---@return table|nil @The towed unit's box over a point (rig-local along), nearest centre first
+local function getTowedBoxAt(rig, along)
+    local best, bestDistance = nil, math.huge
+    for i = 1, #rig.boxes do
+        local box = rig.boxes[i]
+        if not box.isRoot and not box.isFront and box.vehicle ~= nil then
+            local distance = math.abs(along - box.centreAlong)
+            if distance <= getAlongExtent(rig, box) and distance < bestDistance then
+                best, bestDistance = box, distance
+            end
+        end
+    end
+    return best
+end
+
+---@return string|nil @The name of a hit collision shape, or of the first of
+---    its parents that names a wheel, tyre, hub or axle; nil if unnamed
+---@return boolean @True if it is part of a wheel or axle
+local function getShapeIdentity(rig, hitId)
+    if hitId == nil or getName == nil or not entityExists(hitId) then
+        return nil, rig.wheelNodes[hitId] == true
+    end
+    local name = getName(hitId)
+    local node = hitId
+    for _ = 1, 4 do
+        if node == nil or node == 0 or not entityExists(node) then
+            break
+        end
+        if rig.wheelNodes[node] then
+            return name, true
+        end
+        local nodeName = tostring(getName(node)):lower()
+        for _, word in ipairs(DroneCamCreator.WHEEL_SHAPE_WORDS) do
+            if nodeName:find(word, 1, true) ~= nil then
+                return name, true
+            end
+        end
+        node = getParent ~= nil and getParent(node) or nil
+    end
+    return name, false
+end
+
+---@return number|nil @Hub height of the wheel nearest a point (rig-local along), any unit
+local function getHubNear(rig, along)
+    local best, bestDistance = nil, math.huge
+    for _, list in ipairs({ rig.wheels, rig.trainWheels }) do
+        for _, wheel in ipairs(list) do
+            local distance = math.abs(wheel.lz - along)
+            if distance < bestDistance then
+                best, bestDistance = wheel.hub, distance
+            end
+        end
+    end
+    return best
+end
+
+---What one upward ray says about the underside, weighed against the other
+---sources: what the shape it hit is, the wheels (radius and hub height) of the
+---unit above, and the allow list. Mod collision is often rough: a box round
+---the wheels, or axles modelled at the bottom of the tyres.
+---  A wheel or axle shape (by node, or a name with wheel/tyre/hub/axle
+---    in it): the hub height, where the axle really is.
+---  A towed unit on the allow list: its hub height, or clear if it has none.
+---  A towed unit's axle line (between its first and last axle, a wheel
+---    radius either side) reading below its hub height: the hub height. An
+---    axle runs at hub height; anything lower there is the collision, not
+---    the trailer.
+---Anywhere else the collision is taken as it is.
+---@return number, string|nil @Clearance to use, and why it differs from the reading
+local function judgeReading(rig, along, raw, hitId, allow, maxHeight)
+    local name, isWheel = getShapeIdentity(rig, hitId)
+    if isWheel then
+        local hub = getHubNear(rig, along)
+        if hub ~= nil and hub > raw then
+            return hub, ("wheel or axle shape%s: hub height used"):format(name ~= nil and (" '" .. name .. "'") or "")
+        end
+        return raw, nil
+    end
+
+    local box = getTowedBoxAt(rig, along)
+    if box == nil then
+        return raw, nil
+    end
+    local hub, first, last = nil, math.huge, -math.huge
+    for _, wheel in ipairs(rig.trainWheels) do
+        if wheel.vehicle == box.vehicle then
+            hub = math.max(hub or 0, wheel.hub)
+            first = math.min(first, wheel.lz - wheel.radius)
+            last = math.max(last, wheel.lz + wheel.radius)
+        end
+    end
+
+    if DroneCamKit.getIsAllowed(box.vehicle, allow) then
+        local trusted = math.max(raw, hub or maxHeight)
+        return trusted, trusted > raw and "on the allow list" or nil
+    end
+    if hub ~= nil and raw < hub and along >= first and along <= last then
+        return hub, "low reading on the axle line: hub height used"
+    end
+    return raw, nil
+end
+
 ---Map of the underside: for each line across the gap between the wheels, the
 ---lowest clearance along the whole train, from a little past its rear to a
 ---little past its front: the camera stays down until all of it has gone over.
 ---Kept for DRIVE_OVER_GRID_CACHE_TIME, since it takes several hundred rays.
----@return table|nil @{columns = {{offset, clearance}}, lowest = {clearance, along}}
+---@return table|nil @{columns = {{offset, clearance}}, lowest = {clearance, along},
+---    lowestRaw = {clearance, along, offset, hitId, used, why}}
 local function getUndersideGrid(camera, vehicle, rig, centreAcross, span, vehicleFront)
     local now = camera.activeTime or 0
     local cached = camera.undersideGrid
@@ -589,31 +702,76 @@ local function getUndersideGrid(camera, vehicle, rig, centreAcross, span, vehicl
     local step = DroneCamCreator.DRIVE_OVER_LINE_STEP
     local count = math.floor(span / step + 1e-6)
     local maxHeight = DroneCamCreator.DRIVE_OVER_HEIGHT + DroneCamCreator.DRIVE_OVER_HEADROOM + 1
-    local grid = { columns = {}, lowest = { clearance = math.huge, along = 0 } }
+    local grid = { columns = {}, lowest = { clearance = math.huge, along = 0 }, lowestRaw = nil }
+    local allow = camera.settings ~= nil and camera.settings.driveOverAllow or nil
+
+    -- Every PROFILE_STEP along, and on every axle line too: an axle is thinner
+    -- than the step and could fall between two rays.
+    local alongs = {}
+    local along = rig.rear - DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG
+    while along <= vehicleFront + DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG do
+        alongs[#alongs + 1] = along
+        along = along + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
+    end
+    for _, list in ipairs({ rig.wheels, rig.trainWheels }) do
+        for _, wheel in ipairs(list) do
+            alongs[#alongs + 1] = wheel.lz
+        end
+    end
 
     -- One column beyond the outermost line each side, for the lens's width.
     for i = -(count + 1), count + 1 do
         local offset = i * step
         local column = { offset = offset, clearance = math.huge }
-        local along = rig.rear - DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG
-        while along <= vehicleFront + DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG do
+        for _, along in ipairs(alongs) do
             local x, z = DroneCamRig.toWorld(rig, centreAcross + offset, along)
-            local clearance = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, maxHeight)
-            if clearance == nil then
+            local raw, hitId = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, maxHeight)
+            if raw == nil then
                 return nil
             end
+            local clearance, why = judgeReading(rig, along, raw, hitId, allow, maxHeight)
             column.clearance = math.min(column.clearance, clearance)
             if clearance < grid.lowest.clearance then
                 grid.lowest = { clearance = clearance, along = along }
             end
-            along = along + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
+            if hitId ~= nil and (grid.lowestRaw == nil or raw < grid.lowestRaw.clearance) then
+                grid.lowestRaw = { clearance = raw, along = along, offset = offset, hitId = hitId, used = clearance, why = why }
+            end
         end
         grid.columns[#grid.columns + 1] = column
     end
 
     camera.undersideGrid = { vehicle = vehicle, time = now, span = span, front = vehicleFront, signature = signature,
                              rear = rig.rear - rig.rootRear, grid = grid }
+    DroneCamCreator.reportUnderside(camera, rig, grid)
     return grid
+end
+
+---Says which collision shape gave the lowest reading under the train, how
+---high, and what was made of it: on the overlay, and in log.txt as a
+---"[DroneCam]" line whenever it changes.
+function DroneCamCreator.reportUnderside(camera, rig, grid)
+    local raw = grid.lowestRaw
+    local note
+    if raw == nil then
+        note = "nothing hit underneath"
+    else
+        local name = nil
+        if getName ~= nil and entityExists(raw.hitId) then
+            name = getName(raw.hitId)
+        end
+        note = ("lowest collision %.2fm, shape '%s' (node %s), %s, %s"):format(raw.clearance, tostring(name or "?"),
+            tostring(raw.hitId), getUnitAt(rig, raw.along),
+            math.abs(raw.offset) < 0.05 and "on the centre line" or ("%+.2fm off centre"):format(raw.offset))
+        if raw.why ~= nil then
+            note = note .. (" - counted as %.2fm (%s)"):format(raw.used, raw.why)
+        end
+    end
+    camera.undersideNote = note
+    if note ~= camera.undersideLogged then
+        camera.undersideLogged = note
+        print("[DroneCam] Underside: " .. note)
+    end
 end
 
 ---@param forced boolean|string @See getStraightProblem; Ctrl+G (true) also
@@ -624,7 +782,7 @@ local function planDriveOver(camera, vehicle, rig, forced)
 
     -- Nothing on the ground, lowered on the front or hanging off a slurry
     -- tanker: the whole train goes over the camera.
-    local kitProblem = getKitProblem(rig)
+    local kitProblem = getKitProblem(camera, rig)
     if kitProblem ~= nil then
         return nil, kitProblem
     end
@@ -686,8 +844,15 @@ local function planDriveOver(camera, vehicle, rig, forced)
     end
     if chosen.clearance < DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE then
         local lowest = grid.lowest
-        return nil, ("underside too low: best line %.2fm (lowest %.2fm %s), needs %.2fm"):format(
+        local reason = ("underside too low: best line %.2fm (lowest %.2fm %s), needs %.2fm"):format(
             chosen.clearance, lowest.clearance, getUnitAt(rig, lowest.along), DroneCamCreator.DRIVE_OVER_MIN_CLEARANCE)
+        -- Under something towed: say how to allow it anyway.
+        local box = getTowedBoxAt(rig, lowest.along)
+        if box ~= nil then
+            reason = reason .. (" - to allow it, add %s to driveOverAllow in %s"):format(
+                DroneCamKit.getVehicleKey(box.vehicle), DroneCamSettings.XML_FILENAME)
+        end
+        return nil, reason
     end
     local height = math.max(math.min(DroneCamCreator.DRIVE_OVER_HEIGHT, chosen.clearance - DroneCamCreator.DRIVE_OVER_HEADROOM),
                             DroneCamCreator.DRIVE_OVER_MIN_HEIGHT)

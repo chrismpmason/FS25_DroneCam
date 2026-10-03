@@ -111,9 +111,18 @@ function DroneCamSettings.new()
     for _, entry in ipairs(DroneCamSettings.SCHEMA) do
         self[entry[1]] = entry[3]
     end
+    self.driveOverAllow = {}
 
     return self
 end
+
+---Vehicles allowed a drive-over whatever their collision or kind says, by
+---their XML file (as the debug overlay shows it, or just the mod's name):
+---  <driveOverAllow>
+---      <vehicle xmlFilename="FS25_SomeTrailer/trailer.xml"/>
+---  </driveOverAllow>
+DroneCamSettings.ALLOW_PATH = "driveOverAllow.vehicle(%d)#xmlFilename"
+DroneCamSettings.ALLOW_MAX = 200
 
 ---Clamps a numeric value to the range declared in the schema entry.
 local function sanitise(entry, value)
@@ -170,6 +179,19 @@ function DroneCamSettings.restore(settings)
         end
     end
 
+    settings.driveOverAllow = {}
+    if getXMLString ~= nil then
+        for i = 0, DroneCamSettings.ALLOW_MAX - 1 do
+            local name = getXMLString(xmlFileId, getPathForKey(DroneCamSettings.ALLOW_PATH:format(i)))
+            if name == nil then
+                break
+            end
+            if name ~= "" then
+                settings.driveOverAllow[#settings.driveOverAllow + 1] = name
+            end
+        end
+    end
+
     delete(xmlFileId)
 end
 
@@ -196,6 +218,12 @@ function DroneCamSettings.store(settings)
             setXMLInt(xmlFileId, path, math.floor(value))
         else
             setXMLFloat(xmlFileId, path, value)
+        end
+    end
+
+    if setXMLString ~= nil then
+        for i, name in ipairs(settings.driveOverAllow or {}) do
+            setXMLString(xmlFileId, getPathForKey(DroneCamSettings.ALLOW_PATH:format(i - 1)), name)
         end
     end
 

@@ -1023,7 +1023,10 @@ function DroneCamCamera:getDebugLines()
         field ~= nil and (" (%.1f ha, %.0fm across)"):format(field.areaHa, field.length) or " (no field found)")
 
     if self.vehicle ~= nil then
-        lines[#lines + 1] = "Train: " .. DroneCamKit.describe(self.vehicle)
+        lines[#lines + 1] = "Train: " .. DroneCamKit.describe(self.vehicle, self:getRig(self.vehicle), self.settings.driveOverAllow)
+    end
+    if self.undersideNote ~= nil then
+        lines[#lines + 1] = "Underside: " .. self.undersideNote
     end
     lines[#lines + 1] = "Drive-over: " .. tostring(self.debugDriveOver or "checking...")
     if plan ~= nil and DroneCamCreator.getIsGroundPass(plan.shot) and plan.lostReason ~= nil then

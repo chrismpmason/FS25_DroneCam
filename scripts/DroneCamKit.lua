@@ -126,16 +126,59 @@ function DroneCamKit.getFoldTime(vehicle)
     return vehicle:getFoldAnimTime()
 end
 
+---Kinds whose lowered state decides anything (anything on the front too).
+DroneCamKit.LOWERING_MATTERS = { ground = true, pickup = true, header = true, slurryTool = true }
+
+---@return string @The vehicle's XML file as the allow list matches it: the
+---    part after the mods folder for a mod ("FS25_SomeTrailer/trailer.xml"),
+---    the game's own path otherwise ("data/vehicles/.../trailer.xml")
+function DroneCamKit.getVehicleKey(vehicle)
+    local file = tostring(vehicle.configFileName or "?"):gsub("\\", "/")
+    local lower = file:lower()
+    local cut = nil
+    local from = 1
+    while true do
+        local s, e = lower:find("/mods/", from, true)
+        if s == nil then
+            break
+        end
+        cut, from = e, e + 1
+    end
+    if cut ~= nil then
+        file = file:sub(cut + 1)
+    end
+    return file
+end
+
+---@param allow table|nil @Entries from the settings' driveOverAllow list
+---@return boolean @True if the allow list names this vehicle: its whole key,
+---    the end of it ("trailer.xml" after a slash) or its mod ("FS25_SomeTrailer")
+function DroneCamKit.getIsAllowed(vehicle, allow)
+    if allow == nil or #allow == 0 then
+        return false
+    end
+    local key = DroneCamKit.getVehicleKey(vehicle):lower()
+    for _, entry in ipairs(allow) do
+        local name = tostring(entry):gsub("\\", "/"):lower()
+        if name ~= "" and (key == name or key:sub(-#name - 1) == "/" .. name or key:sub(1, #name + 1) == name .. "/") then
+            return true
+        end
+    end
+    return false
+end
+
 ---Why the train rules out a drive-over (a wheel pass instead), or nil if
----the underside is all that is left to decide.
+---the underside is all that is left to decide. Units on the allow list are
+---not asked.
 ---@param rig table @DroneCamRig measurement; its boxes carry the vehicles
 ---@param isSmallFront function @(box) True for front weights and the like
+---@param allow table|nil @The settings' driveOverAllow list
 ---@return string|nil
-function DroneCamKit.getDriveOverProblem(rig, isSmallFront)
+function DroneCamKit.getDriveOverProblem(rig, isSmallFront, allow)
     for i = 1, #rig.boxes do
         local box = rig.boxes[i]
         local unit = box.vehicle
-        if unit ~= nil and not (box.isFront and isSmallFront(box)) then
+        if unit ~= nil and not (box.isFront and isSmallFront(box)) and not (not box.isRoot and DroneCamKit.getIsAllowed(unit, allow)) then
             local kind, label = DroneCamKit.getKind(unit)
             local lowered = DroneCamKit.getIsLowered(unit)
 
@@ -169,9 +212,10 @@ function DroneCamKit.snapshot(vehicle)
     local states = {}
     for i = 1, #units do
         local unit = units[i]
-        local _, label = DroneCamKit.getKind(unit)
+        local kind, label = DroneCamKit.getKind(unit)
         states[i] = {
             vehicle = unit,
+            kind = kind,
             label = unit == vehicle and "vehicle" or label,
             fold = DroneCamKit.getFoldTime(unit),
             lowered = DroneCamKit.getIsLowered(unit)
@@ -180,16 +224,32 @@ function DroneCamKit.snapshot(vehicle)
     return states
 end
 
----@return string @Every unit in the train and its state, for the debug overlay
-function DroneCamKit.describe(vehicle)
+---@param rig table|nil @The measured rig, to tell what is on the front
+---@param allow table|nil @The settings' driveOverAllow list
+---@return string @Every unit in the train and its state, for the debug
+---    overlay: lowered only where it decides anything ("n/a" on a plain
+---    trailer), fold time, and each towed unit's key for the allow list
+function DroneCamKit.describe(vehicle, rig, allow)
+    local isFront = {}
+    for _, box in ipairs(rig ~= nil and rig.boxes or {}) do
+        if box.vehicle ~= nil then
+            isFront[box.vehicle] = box.isFront
+        end
+    end
+
     local parts = {}
     for i, state in ipairs(DroneCamKit.snapshot(vehicle)) do
         local text = state.label
-        if state.lowered ~= nil then
-            text = text .. (state.lowered and " (lowered" or " (raised")
-            text = text .. (state.fold ~= nil and (", fold %.2f)"):format(state.fold) or ")")
-        elseif state.fold ~= nil then
-            text = text .. (" (fold %.2f)"):format(state.fold)
+        if state.vehicle ~= vehicle then
+            text = text .. " [" .. DroneCamKit.getVehicleKey(state.vehicle) .. "]"
+            if DroneCamKit.getIsAllowed(state.vehicle, allow) then
+                text = text .. " allowed"
+            end
+            local lowered = "n/a"
+            if DroneCamKit.LOWERING_MATTERS[state.kind] or isFront[state.vehicle] then
+                lowered = state.lowered == nil and "can't tell" or (state.lowered and "yes" or "no")
+            end
+            text = text .. " (lowered " .. lowered .. (state.fold ~= nil and (", fold %.2f)"):format(state.fold) or ")")
         end
         parts[i] = text
     end
