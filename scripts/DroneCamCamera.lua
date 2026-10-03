@@ -139,12 +139,19 @@ function DroneCamCamera.new(settings)
 
     g_cameraManager:addCamera(self.cameraNode, nil, false)
 
-    self.appliedFov = settings.fov
+    self.appliedFov = nil
+    self:setFov(settings.fov)
 
     self.director = DroneCamDirector.new(settings)
     self.director.isShotAvailable = function(shot)
         return self:getIsShotAvailable(shot)
     end
+    self.director.isShotStillUsable = function(shot)
+        return self:getIsShotStillUsable(shot)
+    end
+
+    self.frameId = 0
+    self.vehicleSpeed = 0
 
     self:resetState()
 
@@ -196,8 +203,13 @@ end
 function DroneCamCamera:resetShot()
     self.shot = nil
     self.shotSide = 1
+    self.plan = nil
+    self.planCache = {}
+    self.shotElapsed = 0
+    self.shotDuration = 0
     self.fromPose = nil
     self.shotBlendElapsed = 0
+    self.shotBlendDuration = 0
     self.blendBearingDiff = nil
 
     if self.director ~= nil then
@@ -249,7 +261,7 @@ function DroneCamCamera:activate(fromNode, vehicle)
         end
     end
 
-    self:applyFov()
+    self:setFov(self.settings.fov)
     g_cameraManager:setActiveCamera(self.cameraNode)
 end
 
@@ -276,14 +288,15 @@ function DroneCamCamera:getIsBlendingOut()
     return self.blendOutActive == true
 end
 
----Re-applies the configured field of view if it has changed.
-function DroneCamCamera:applyFov()
-    if self.cameraNode == nil then
+---Sets the camera's field of view, in degrees, if it has changed. Most shots
+---use the configured value; the long lens and the fixed spots zoom in.
+function DroneCamCamera:setFov(fov)
+    if self.cameraNode == nil or (self.appliedFov ~= nil and math.abs(self.appliedFov - fov) < 0.01) then
         return
     end
 
-    setFovY(self.cameraNode, math.rad(self.settings.fov))
-    self.appliedFov = self.settings.fov
+    setFovY(self.cameraNode, math.rad(fov))
+    self.appliedFov = fov
 end
 
 ---Highest terrain height on a small grid around the given world position.
@@ -388,9 +401,14 @@ end
 ---@return number, number, number @Desired look target
 ---@return number|nil @Explicit yaw override (used by the top-down mode)
 ---@return number|nil @Explicit pitch override
+---@return number|nil @How much of the override applies; all of it when nil
 function DroneCamCamera:getModeTransform(vehicle, mode)
     if DroneCamDirector.getIsCloseUp(mode) then
         return self:getCloseUpTransform(vehicle, mode)
+    end
+
+    if DroneCamCreator.getIsCreatorShot(mode) then
+        return DroneCamCreator.getTransform(self, vehicle, mode)
     end
 
     local settings = self.settings
@@ -439,13 +457,65 @@ function DroneCamCamera:getRig(vehicle)
     return self.rig
 end
 
----@return boolean @False for a close-up with nothing to film
+---Plan for a fixed creator shot, worked out at most once per frame however
+---often the director asks while choosing.
+---@return table|nil
+function DroneCamCamera:getPlan(shot)
+    local cached = self.planCache[shot]
+    if cached ~= nil and cached.frameId == self.frameId then
+        return cached.plan
+    end
+
+    local plan = nil
+    if self.vehicle ~= nil then
+        plan = DroneCamCreator.plan(self, self.vehicle, shot)
+    end
+    self.planCache[shot] = { frameId = self.frameId, plan = plan }
+
+    return plan
+end
+
+---@return boolean @False for a shot with nothing to film or nowhere to film it from
 function DroneCamCamera:getIsShotAvailable(shot)
     if shot == DroneCamSettings.SHOT_IMPLEMENT then
         local rig = self:getRig(self.vehicle)
         return rig ~= nil and rig.work ~= nil
     end
+
+    if DroneCamCreator.getNeedsPlan(shot) then
+        return self:getPlan(shot) ~= nil
+    end
+
+    if DroneCamCreator.getIsCreatorShot(shot) then
+        return self:getRig(self.vehicle) ~= nil
+    end
+
     return true
+end
+
+---@return boolean @False once the shot on screen can no longer carry on
+function DroneCamCamera:getIsShotStillUsable(shot)
+    if shot == DroneCamSettings.SHOT_IMPLEMENT then
+        return self:getIsShotAvailable(shot)
+    end
+
+    if DroneCamCreator.getNeedsPlan(shot) then
+        if shot ~= self.shot then
+            -- Chosen this frame and not taken up yet: its plan is in the cache.
+            return self:getPlan(shot) ~= nil
+        end
+        return self.plan ~= nil and self.plan.shot == shot and not self.plan.isLost
+    end
+
+    return true
+end
+
+---@return number @How far through the shot on screen we are, 0..1
+function DroneCamCamera:getShotProgress()
+    if self.shotDuration <= 0 then
+        return 1
+    end
+    return math.min(self.shotElapsed / self.shotDuration, 1)
 end
 
 ---Close-up angles, placed from the measured rig so they scale with it. Every
@@ -539,6 +609,11 @@ DroneCamCamera.OVERHEAD_RADIUS = 1
 ---quarter turn or more round it.
 DroneCamCamera.ARC_CLEARANCE = 2
 
+---Average speed limit for a glide between shots, in metres per second, and the
+---longest a glide may take however far it has to go.
+DroneCamCamera.MAX_GLIDE_SPEED = 60
+DroneCamCamera.MAX_GLIDE_TIME = 8
+
 local function smoothstep(t)
     return t * t * (3 - 2 * t)
 end
@@ -550,7 +625,18 @@ function DroneCamCamera:getShotTracking(shot)
     if DroneCamDirector.getIsCloseUp(shot) then
         return 1, DroneCamCamera.CLOSEUP_CLEARANCE
     end
+    if DroneCamCreator.getIsCreatorShot(shot) then
+        return DroneCamCreator.getTracking(self, shot)
+    end
     return 0, self.settings.minClearance
+end
+
+---@return number @Field of view for a shot, in degrees
+function DroneCamCamera:getShotFov(vehicle, shot)
+    if DroneCamCreator.getIsCreatorShot(shot) then
+        return DroneCamCreator.getFov(self, vehicle, shot)
+    end
+    return self.settings.fov
 end
 
 ---Describes one angle relative to the vehicle: bearing, radius and height of the
@@ -565,7 +651,7 @@ end
 ---@return table
 function DroneCamCamera:getShotPose(vehicle, mode)
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
-    local px, py, pz, lx, ly, lz, yaw, pitch = self:getModeTransform(vehicle, mode)
+    local px, py, pz, lx, ly, lz, yaw, pitch, overrideWeight = self:getModeTransform(vehicle, mode)
     local dx, dz = px - vx, pz - vz
     local heading = self.vehicleHeading
     local fwdX, fwdZ = math.sin(heading), math.cos(heading)
@@ -580,9 +666,10 @@ function DroneCamCamera:getShotPose(vehicle, mode)
         lookY = ly - vy,
         lookAlong = lookDX * fwdX + lookDZ * fwdZ,
         yaw = yaw ~= nil and yaw - heading or nil, pitch = pitch,
-        overrideWeight = yaw ~= nil and 1 or 0,
+        overrideWeight = yaw ~= nil and (overrideWeight or 1) or 0,
         tracking = tracking,
-        clearance = clearance
+        clearance = clearance,
+        fov = self:getShotFov(vehicle, mode)
     }
 end
 
@@ -641,8 +728,69 @@ function DroneCamCamera:blendPoses(from, to, t)
         yaw = yaw, pitch = pitch,
         overrideWeight = lerp(from.overrideWeight, to.overrideWeight, t),
         tracking = lerp(from.tracking, to.tracking, t),
-        clearance = lerp(from.clearance, to.clearance, t)
+        clearance = lerp(from.clearance, to.clearance, t),
+        fov = lerp(from.fov, to.fov, t)
     }
+end
+
+---Times the glide into a newly entered shot. A long glide also extends the
+---director's hold on the shot by the extra time, so a shot that is a long way
+---off still gets its full time on screen once the camera arrives.
+function DroneCamCamera:startGlide(vehicle, shot)
+    self.shotBlendDuration = self:getGlideDuration(self.fromPose, self:getShotPose(vehicle, shot))
+
+    local extra = self.shotBlendDuration - self.settings.shotBlendTime
+    if extra > 0 and self.director.isRunning and self.director.shot == shot then
+        self.director.shotLength = self.director.shotLength + extra
+    end
+end
+
+---Pose describing where the camera is right now, in the same vehicle-relative
+---terms as getShotPose, to glide out from at take-off.
+---@return table
+function DroneCamCamera:getCameraPose(vehicle)
+    local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+    local heading = self.vehicleHeading
+    local fwdX, fwdZ = math.sin(heading), math.cos(heading)
+    local dx, dz = self.posX - vx, self.posZ - vz
+    local lookDX, lookDZ = self.lookX - vx, self.lookZ - vz
+
+    return {
+        radius = math.sqrt(dx * dx + dz * dz),
+        bearing = math.atan2(dx, dz) - heading,
+        height = self.posY - vy,
+        lookAcross = lookDX * fwdZ - lookDZ * fwdX,
+        lookY = self.lookY - vy,
+        lookAlong = lookDX * fwdX + lookDZ * fwdZ,
+        overrideWeight = 0,
+        -- The vehicle camera rides with the vehicle.
+        tracking = 1,
+        clearance = DroneCamCamera.CLOSEUP_CLEARANCE,
+        fov = self.appliedFov or self.settings.fov
+    }
+end
+
+---How long the glide between two poses takes: shotBlendTime normally, longer
+---when the camera has a long way to travel (a fixed spot 150m off, the start of
+---a push-in), so it never streaks across the sky.
+---@return number @Seconds
+function DroneCamCamera:getGlideDuration(from, to)
+    local minimum = self.settings.shotBlendTime
+    if minimum <= 0 then
+        return 0
+    end
+
+    local turn = 0
+    if from.radius >= DroneCamCamera.OVERHEAD_RADIUS and to.radius >= DroneCamCamera.OVERHEAD_RADIUS then
+        turn = math.abs(normaliseAngleDiff(to.bearing - from.bearing))
+    end
+
+    local radial = to.radius - from.radius
+    local around = (from.radius + to.radius) * 0.5 * turn
+    local vertical = to.height - from.height
+    local travel = math.sqrt(radial * radial + around * around + vertical * vertical)
+
+    return math.min(math.max(travel / DroneCamCamera.MAX_GLIDE_SPEED, minimum), math.max(DroneCamCamera.MAX_GLIDE_TIME, minimum))
 end
 
 ---@return number @Eased progress of the current change of angle, 1 when settled
@@ -651,7 +799,7 @@ function DroneCamCamera:getShotBlendAlpha()
         return 1
     end
 
-    local duration = self.settings.shotBlendTime
+    local duration = self.shotBlendDuration
     if duration <= 0 then
         return 1
     end
@@ -675,41 +823,62 @@ end
 function DroneCamCamera:getWantedShot(dtSeconds, heading)
     local mode = self.settings.mode
 
-    if mode ~= DroneCamSettings.MODE_AUTO then
+    if not DroneCamSettings.getIsAutoMode(mode) then
         if self.director.isRunning then
             self.director:reset()
         end
         return mode
     end
 
+    local isStory = mode == DroneCamSettings.MODE_AUTO
+
     if not self.director.isRunning then
         -- Open on whatever is already on screen, so choosing the mode is not
         -- itself a change of angle.
-        self.director:start(self.shot, heading)
+        self.director:start(self.shot, heading, isStory)
+    else
+        self.director:setStory(isStory)
     end
 
     return self.director:update(dtSeconds, heading)
 end
 
+---Takes up a new shot: its plan (if it is a fixed shot), its clock and its side.
+function DroneCamCamera:enterShot(shot)
+    self.shot = shot
+    self.shotSide = self.director.side
+    self.shotElapsed = 0
+    self.shotDuration = self.director.isRunning and self.director.shotLength or 0
+    self.plan = DroneCamCreator.getNeedsPlan(shot) and self:getPlan(shot) or nil
+end
+
 ---Follows the wanted angle, starting a blend whenever it changes.
 ---@param heading number|nil @Raw vehicle heading in radians
 function DroneCamCamera:updateShot(dtSeconds, vehicle, heading)
+    self.shotElapsed = self.shotElapsed + dtSeconds
+
     local wanted = self:getWantedShot(dtSeconds, heading)
 
     if self.shot == nil then
-        -- First frame after activation: the activation blend already eases in.
-        self.shot = wanted
-        self.shotSide = self.director.side
+        -- First frame after activation: glide out from wherever the vehicle
+        -- camera left the drone, like any other change of shot, so taking off
+        -- to an establishing shot 400m away is a flight and not a streak.
+        self.fromPose = self:getCameraPose(vehicle)
+        self.shotBlendElapsed = 0
+        self.blendBearingDiff = nil
+        self:enterShot(wanted)
+        self:startGlide(vehicle, wanted)
     elseif wanted ~= self.shot then
         -- Freeze wherever the camera is aiming right now, part-way through an
         -- earlier blend included, so a quick second change never jumps. The
-        -- director has already picked the next angle's side by now, so the
-        -- outgoing angle is framed with the side it was actually shot from.
+        -- director has already moved on to the next shot by now, so the
+        -- outgoing one is framed with its own side, plan and progress, which
+        -- enterShot only replaces afterwards.
         self.fromPose = self:getCurrentPose(vehicle)
         self.shotBlendElapsed = 0
         self.blendBearingDiff = nil
-        self.shot = wanted
-        self.shotSide = self.director.side
+        self:enterShot(wanted)
+        self:startGlide(vehicle, wanted)
 
         if wanted == DroneCamSettings.MODE_ORBIT then
             -- Start circling from the camera's current bearing rather than
@@ -725,7 +894,7 @@ function DroneCamCamera:updateShot(dtSeconds, vehicle, heading)
     elseif self.fromPose ~= nil then
         self.shotBlendElapsed = self.shotBlendElapsed + dtSeconds
 
-        if self.shotBlendElapsed >= self.settings.shotBlendTime then
+        if self.shotBlendElapsed >= self.shotBlendDuration then
             self.fromPose = nil
             self.blendBearingDiff = nil
         end
@@ -738,11 +907,13 @@ end
 ---@return number|nil, number|nil @Yaw and pitch override
 ---@return number @How much of the override to apply, 0..1
 ---@return number, number @Tracking 0..1 and terrain clearance, see getShotTracking
+---@return number @Field of view in degrees
 function DroneCamCamera:getShotTransform(vehicle)
     if self.fromPose == nil then
-        local px, py, pz, lx, ly, lz, yaw, pitch = self:getModeTransform(vehicle, self.shot)
+        local px, py, pz, lx, ly, lz, yaw, pitch, weight = self:getModeTransform(vehicle, self.shot)
         local tracking, clearance = self:getShotTracking(self.shot)
-        return px, py, pz, lx, ly, lz, yaw, pitch, yaw ~= nil and 1 or 0, tracking, clearance
+        return px, py, pz, lx, ly, lz, yaw, pitch, yaw ~= nil and (weight or 1) or 0,
+               tracking, clearance, self:getShotFov(vehicle, self.shot)
     end
 
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
@@ -758,7 +929,7 @@ function DroneCamCamera:getShotTransform(vehicle)
            vy + pose.lookY,
            vz - fwdX * pose.lookAcross + fwdZ * pose.lookAlong,
            pose.yaw ~= nil and pose.yaw + heading or nil, pose.pitch, pose.overrideWeight,
-           pose.tracking, pose.clearance
+           pose.tracking, pose.clearance, pose.fov
 end
 
 ---Raises the camera while the line from the aim point to the camera is blocked
@@ -876,9 +1047,7 @@ function DroneCamCamera:update(dt, vehicle)
     local settings = self.settings
     local dtSeconds = dt * 0.001
 
-    if self.appliedFov ~= settings.fov then
-        self:applyFov()
-    end
+    self.frameId = self.frameId + 1
 
     -- Smooth the vehicle heading first; every mode is built on top of it, so a
     -- U-turn becomes a slow sweeping pan rather than a snap.
@@ -898,9 +1067,18 @@ function DroneCamCamera:update(dt, vehicle)
 
     self.orbitAngle = self.orbitAngle + math.rad(settings.orbitSpeed) * dtSeconds
 
+    -- Ground speed, for judging how soon the end of the row comes up.
+    local vehicleX, vehicleY, vehicleZ = getWorldTranslation(vehicle.rootNode)
+    if self.lastVehicleX ~= nil and dtSeconds > 0 then
+        local dx, dz = vehicleX - self.lastVehicleX, vehicleZ - self.lastVehicleZ
+        local speed = math.sqrt(dx * dx + dz * dz) / dtSeconds
+        self.vehicleSpeed = self.vehicleSpeed + (speed - self.vehicleSpeed) * smoothingAlpha(dtSeconds, 2)
+    end
+
     local isBlendingOut = self.blendOutActive == true
     local desiredPosX, desiredPosY, desiredPosZ
     local desiredLookX, desiredLookY, desiredLookZ
+    local desiredFov = settings.fov
     local yawOverride, pitchOverride
     local overrideWeight = 0
     local tracking, clearance = 0, settings.minClearance
@@ -925,7 +1103,7 @@ function DroneCamCamera:update(dt, vehicle)
 
         desiredPosX, desiredPosY, desiredPosZ,
         desiredLookX, desiredLookY, desiredLookZ,
-        yawOverride, pitchOverride, overrideWeight, tracking, clearance = self:getShotTransform(vehicle)
+        yawOverride, pitchOverride, overrideWeight, tracking, clearance, desiredFov = self:getShotTransform(vehicle)
 
         local swayX, swayY, swayZ = self:getSwayOffset()
         desiredPosX = desiredPosX + swayX
@@ -955,7 +1133,6 @@ function DroneCamCamera:update(dt, vehicle)
     -- Close-ups ride along with the vehicle: move the camera by however far the
     -- vehicle moved before smoothing, so the smoothing only softens changes of
     -- framing and never leaves the shot trailing metres behind.
-    local vehicleX, vehicleY, vehicleZ = getWorldTranslation(vehicle.rootNode)
     if not isBlendingOut and tracking > 0 and self.lastVehicleX ~= nil then
         local moveX = (vehicleX - self.lastVehicleX) * tracking
         local moveY = (vehicleY - self.lastVehicleY) * tracking
@@ -986,6 +1163,11 @@ function DroneCamCamera:update(dt, vehicle)
     if not isBlendingOut then
         self:updateObstacleClearance(dtSeconds)
         self:applyHardFloors(vehicle)
+        DroneCamCreator.updateSight(self.plan, dtSeconds, self.posX, self.posY, self.posZ, vehicle)
+        self:setFov(desiredFov)
+    elseif self.appliedFov ~= nil then
+        -- Zoom back out to the normal field of view on the way home.
+        self:setFov(lerp(self.appliedFov, settings.fov, posAlpha))
     end
 
     setWorldTranslation(self.cameraNode, self.posX, self.posY, self.posZ)

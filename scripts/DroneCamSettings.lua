@@ -7,24 +7,47 @@ DroneCamSettings = {}
 DroneCamSettings.MODE_CHASE = 1
 DroneCamSettings.MODE_TOPDOWN = 2
 DroneCamSettings.MODE_ORBIT = 3
----Not an angle of its own: cuts between the three above (see DroneCamDirector).
+---Not angles of their own: the Auto director cuts between shots (see
+---DroneCamDirector), either following a story sequence or at random.
 DroneCamSettings.MODE_AUTO = 4
+DroneCamSettings.MODE_AUTO_RANDOM = 5
 DroneCamSettings.MODE_FIRST = 1
-DroneCamSettings.MODE_LAST = 4
+DroneCamSettings.MODE_LAST = 5
 
----Close-up angles. These are not modes: only the Auto director uses them, so
----they sit outside the MODE_FIRST..MODE_LAST range that Ctrl+C cycles through.
-DroneCamSettings.SHOT_WHEEL = 5
-DroneCamSettings.SHOT_IMPLEMENT = 6
-DroneCamSettings.SHOT_SIDE = 7
-DroneCamSettings.SHOT_FRONT = 8
-DroneCamSettings.SHOT_REAR_QUARTER = 9
+---@return boolean @True for either Auto director mode
+function DroneCamSettings.getIsAutoMode(mode)
+    return mode == DroneCamSettings.MODE_AUTO or mode == DroneCamSettings.MODE_AUTO_RANDOM
+end
+
+---Shots only the Auto director uses. They are numbered well clear of the
+---MODE_FIRST..MODE_LAST range that Ctrl+C cycles through and that is saved.
+
+-- Close-ups.
+DroneCamSettings.SHOT_WHEEL = 101
+DroneCamSettings.SHOT_IMPLEMENT = 102
+DroneCamSettings.SHOT_SIDE = 103
+DroneCamSettings.SHOT_FRONT = 104
+DroneCamSettings.SHOT_REAR_QUARTER = 105
+
+-- Creator shots that hold a framing: high over the field, or from a fixed spot.
+DroneCamSettings.SHOT_ESTABLISHING = 201
+DroneCamSettings.SHOT_LONG_LENS = 202
+DroneCamSettings.SHOT_EDGE_PAN = 203
+DroneCamSettings.SHOT_HEADLAND = 204
+
+-- Creator shots that travel along a path over the length of the shot.
+DroneCamSettings.SHOT_PUSH_IN = 211
+DroneCamSettings.SHOT_PULL_OUT = 212
+DroneCamSettings.SHOT_FLY_OVER = 213
+DroneCamSettings.SHOT_RISE_UP = 214
+DroneCamSettings.SHOT_SLIDE = 215
 
 DroneCamSettings.MODE_L10N = {
     [DroneCamSettings.MODE_CHASE] = "droneCam_mode_chase",
     [DroneCamSettings.MODE_TOPDOWN] = "droneCam_mode_topDown",
     [DroneCamSettings.MODE_ORBIT] = "droneCam_mode_orbit",
-    [DroneCamSettings.MODE_AUTO] = "droneCam_mode_auto"
+    [DroneCamSettings.MODE_AUTO] = "droneCam_mode_auto",
+    [DroneCamSettings.MODE_AUTO_RANDOM] = "droneCam_mode_autoRandom"
 }
 
 DroneCamSettings.XML_ROOT = "droneCam"
@@ -58,6 +81,8 @@ DroneCamSettings.SCHEMA = {
     { "closeUps",        "bool",  true },
     { "closeUpMinShot",  "float", 6,     2,   60 },
     { "closeUpMaxShot",  "float", 10,    2,   60 },
+    { "movingMinShot",   "float", 7,     3,   60 },
+    { "movingMaxShot",   "float", 10,    3,   60 },
     { "followAI",        "bool",  false },
     { "sway",            "bool",  true },
     { "swayAmplitude",   "float", 0.4,   0,   3 },
