@@ -16,22 +16,34 @@ that cuts between those, five close-ups and nine creator shots:
   position), pull-out reveal, fly-over (front to back over the vehicle),
   rise-up (low behind, climbing to top-down) and slide (far off to the side).
 - **Hero shot: drive-over.** The camera sits 0.3m up on the ground 30–40m
-  ahead, centred between the wheels, and the vehicle drives over it. As it
-  passes the camera swings round in about 1.4 seconds to watch it go, then
-  rises into the chase position before anything towed behind can reach it.
-  It is only used on a straight run with no headland coming, at 7 km/h or
-  more, out of tall standing crop, not under trees, on even ground (a
-  steady slope is fine, a bump is not), when raycasts against the vehicle's
-  collision find a line between the wheels with at least 0.35m clear
-  underneath, all along the vehicle (the camera takes the line with the most
-  room, beside a drawbar or hitch rather than under it, and comes down to
-  0.2m below the underside, never lower than 0.15m; front weights included:
-  small front attachments are fine if they clear it, headers and front
-  mowers are not), and when anything towed leaves a clear gap of 2.5m or more,
-  empty all the way up on the centre line, with time to rise. In practice
-  that means self-propelled machines with clearance, a tractor on its own
-  (Ctrl+F), or trailed kit with a clear gap; most mounted implements leave
-  no way up, so the shot is skipped for them.
+  ahead, between the wheels, and the vehicle drives over it. As it passes
+  the camera swings round in about 1.4 seconds to watch it go. It stays on the
+  ground until everything towed (trailers, a sprayer and its boom) has gone
+  over it too, then rises into the chase position. It is only used on a
+  straight run with no headland coming, at 7 km/h or more, out of tall
+  standing crop, not under trees, on even ground (a steady slope is fine, a
+  bump is not), and when raycasts against the collision of the whole train
+  find a line between the wheels with at least 0.35m clear underneath, front
+  to back. The camera takes the line with the most room (beside a drawbar or
+  hitch rather than under it, never in the track of a towed unit's wheels)
+  and comes down to 0.2m below the underside, never lower than 0.15m.
+
+  What is attached decides whether it may try at all:
+
+  | Attached | Drive-over |
+  | --- | --- |
+  | Tippers, grain trailers, chaser bins, bale trailers, low loaders, muck spreaders | yes, if the underside clears |
+  | Sprayers, trailed or self-propelled, boom folded or unfolded | yes, if the underside clears; a lowered boom has to clear the camera too |
+  | Slurry tankers | yes, unless a dribble bar or injector is lowered |
+  | Balers, forage wagons | never |
+  | Mowers, rakes, tedders, drills, cultivators, ploughs and anything else working the ground | not while lowered |
+  | Combine headers and other front tools | only while raised |
+
+  Every unit in the train is checked. Anything that can't say whether it is
+  lowered counts as lowered. If anything folds, unfolds, is lowered or raised
+  during the pass, the drive-over is called off: with a glide if nothing has
+  reached the camera yet, otherwise with a straight cut to the next shot, so
+  the camera never moves through the kit.
 
 Auto director has two styles, both on Ctrl+C. **Story** follows establishing →
 push-in → two or three close-ups → fly-over → pull-out reveal and round again,
@@ -112,14 +124,17 @@ All are rebindable in the game's control settings.
 | `Ctrl+Shift+D` | Debug overlay: the shot on screen, the field, and why a drive-over can or can't be done |
 
 **Drive-over mode.** The last mode on Ctrl+C sets up a drive-over on every
-straight run — or, with an implement working the ground (which leaves no way up
-between tractor and implement), a **wheel pass**: the camera sits 0.4m up just
-outside the widest part of the combination and sweeps along it as it rolls past,
-then rises into the chase. In between, and through headland turns, it holds a
+straight run. When the drive-over isn't allowed (see the table above) or the
+underside doesn't clear, it sets up a **wheel pass** instead: the camera sits
+0.4m up just outside the widest part of the combination and sweeps along it as
+it rolls past, then rises into the chase. A boom unfolding beside the camera
+calls that off too. The log says why it wasn't a drive-over ("wheel pass set
+up (no drive-over: …)"). In between, and through headland turns, it holds a
 low chase, and sets up the next pass once the vehicle has been straight for
 1.5s (and at least 5s after the last). If a pass can't be done the reason stays
 on screen ("Drive-over mode: waiting - …") and goes into `log.txt` as a
-`[DroneCam]` line each time it changes.
+`[DroneCam]` line each time it changes. The Ctrl+Shift+D overlay lists the
+train as DroneCam sees it, with each unit's fold and lowered state.
 
 **Hired workers, Courseplay and AutoDrive.** While one of their jobs is running
 on your vehicle, a drone that is up stays up, even while the vehicle waits or
@@ -145,6 +160,7 @@ scripts/DroneCamCreator.lua      creator shots and drive-over: planning, paths, 
 scripts/DroneCamRig.lua          vehicle + implement measurement, vehicle floor
 scripts/DroneCamField.lua        game field lookup, size class, field edges
 scripts/DroneCamSpot.lua         fixed-spot checks: clear spot, line of sight
+scripts/DroneCamKit.lua          what is attached: drive-over rules, fold/lower watch
 scripts/DroneCamWorkDetect.lua   field-work detection and hysteresis
 scripts/DroneCamSettings.lua     defaults and XML persistence
 test/test_dronecam.lua           offline test suite
@@ -165,8 +181,10 @@ long simulated flights, the story sequence and its variety, every creator
 shot's spot or path, and story and random flights through a world with a
 hedge, a forest and a barn where every frame is checked for obstacles, sight
 of the vehicle, smoothness and zoom, the drive-over (every reason to skip it,
-then full runs over a tractor with a real collision underside and with
-trailed kit, checked every frame for distance to every collision body), combine
+then full runs over a tractor with a real collision underside, one and two
+trailers, a sprayer with its boom down and a combine with its header raised,
+checked every frame for distance to every collision body; the rule for each
+kind of implement; kit folding or lowering mid-pass), combine
 and hired-helper detection, settings round-tripping, and every path that must
 return the player to their own camera.
 

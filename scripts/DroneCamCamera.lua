@@ -1022,9 +1022,12 @@ function DroneCamCamera:getDebugLines()
     lines[#lines + 1] = ("Field: %s%s"):format(tostring(self.fieldClass or "medium"),
         field ~= nil and (" (%.1f ha, %.0fm across)"):format(field.areaHa, field.length) or " (no field found)")
 
+    if self.vehicle ~= nil then
+        lines[#lines + 1] = "Train: " .. DroneCamKit.describe(self.vehicle)
+    end
     lines[#lines + 1] = "Drive-over: " .. tostring(self.debugDriveOver or "checking...")
-    if plan ~= nil and plan.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan.lostReason ~= nil then
-        lines[#lines + 1] = "Last drive-over dropped: " .. plan.lostReason
+    if plan ~= nil and DroneCamCreator.getIsGroundPass(plan.shot) and plan.lostReason ~= nil then
+        lines[#lines + 1] = "Last " .. DroneCamCamera.SHOT_NAMES[plan.shot] .. " dropped: " .. plan.lostReason
     end
     if self.lastForceResult ~= nil then
         lines[#lines + 1] = "Last Ctrl+G: " .. self.lastForceResult
@@ -1173,7 +1176,8 @@ function DroneCamCamera:getDriveOverModeShot(dtSeconds)
         local shot, newPlan, reason = DroneCamCreator.planGroundPass(self, self.vehicle, "mode")
         if newPlan ~= nil then
             self.planCache[shot] = { frameId = self.frameId, plan = newPlan }
-            self:reportMode(DroneCamCamera.SHOT_NAMES[shot] .. " set up")
+            local note = newPlan.driveOverReason ~= nil and (" (no drive-over: " .. newPlan.driveOverReason .. ")") or ""
+            self:reportMode(DroneCamCamera.SHOT_NAMES[shot] .. " set up" .. note)
             return shot
         end
         self:reportMode("waiting - " .. tostring(reason))
@@ -1241,6 +1245,10 @@ function DroneCamCamera:updateShot(dtSeconds, vehicle, heading)
         self:enterShot(wanted)
         self:startGlide(vehicle, wanted)
     elseif wanted ~= self.shot then
+        -- A ground pass called off with kit over or beside the camera: any
+        -- glide out would go through it, so this one change is a cut.
+        local isCut = self.plan ~= nil and self.plan.cutAway == true and self.plan.shot == self.shot
+
         -- Freeze wherever the camera is aiming right now, part-way through an
         -- earlier blend included, so a quick second change never jumps. The
         -- director has already moved on to the next shot by now, so the
@@ -1251,6 +1259,11 @@ function DroneCamCamera:updateShot(dtSeconds, vehicle, heading)
         self.blendBearingDiff = nil
         self:enterShot(wanted)
         self:startGlide(vehicle, wanted)
+
+        if isCut then
+            self.fromPose = nil
+            self.isCutting = true
+        end
 
         if wanted == DroneCamSettings.MODE_ORBIT then
             -- Start circling from the camera's current bearing rather than
@@ -1394,8 +1407,8 @@ end
 ---snapped up in a single frame.
 ---@param isGroundLow boolean @On the ground for a drive-over or wheel pass: lower
 ---    ground floor, and no crop floor (the shot checked the crop)
----@param isUnderVehicle boolean @The drive-over: the vehicle it goes under is left
----    out of the vehicle floor (anything towed still counts)
+---@param isUnderVehicle boolean @The drive-over: the train it goes under (vehicle,
+---    weights, header, anything towed) is left out of the vehicle floor
 function DroneCamCamera:applyHardFloors(vehicle, isGroundLow, isUnderVehicle)
     local ground = getTerrainHeightAt(self.posX, self.posZ)
     local groundClearance = DroneCamCamera.HARD_GROUND_CLEARANCE
@@ -1516,7 +1529,7 @@ function DroneCamCamera:update(dt, vehicle)
 
         -- On the ground for a drive-over the camera is placed to the
         -- centimetre: no drift, no crop or vehicle floor for the vehicle it is
-        -- meant to go under (towed kit still counts), a single terrain sample.
+        -- meant to go under (the whole train), a single terrain sample.
         isDriveOverLow = DroneCamCreator.getIsDriveOverLow(self)
         isGroundLow = DroneCamCreator.getIsGroundPassLow(self)
 
@@ -1586,6 +1599,13 @@ function DroneCamCamera:update(dt, vehicle)
         posAlpha = 1
     end
 
+    -- A cut away from a called-off ground pass: straight there, in one frame.
+    local isCutting = self.isCutting == true and not isBlendingOut
+    self.isCutting = false
+    if isCutting then
+        posAlpha, lookAlpha = 1, 1
+    end
+
     self.posX = lerp(self.posX, desiredPosX, posAlpha)
     self.posY = lerp(self.posY, desiredPosY, posAlpha)
     self.posZ = lerp(self.posZ, desiredPosZ, posAlpha)
@@ -1648,7 +1668,7 @@ function DroneCamCamera:update(dt, vehicle)
     -- Some changes of angle need the view to turn right round, such as top-down
     -- (facing forward) to the front close-up (facing back). Cap the turn rate
     -- so that happens as a steady pan across the blend, not a whip.
-    if self.lastRotY ~= nil and not isBlendingOut then
+    if self.lastRotY ~= nil and not isBlendingOut and not isCutting then
         local maxRate = DroneCamCamera.MAX_YAW_RATE
         if isDriveOverLow and self.plan.phase == "swing" then
             -- The drive-over's swing is meant to be quick.

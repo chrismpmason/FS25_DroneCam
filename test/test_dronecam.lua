@@ -239,6 +239,7 @@ dofile(MOD .. "/scripts/DroneCamWorkDetect.lua")
 dofile(MOD .. "/scripts/DroneCamRig.lua")
 dofile(MOD .. "/scripts/DroneCamField.lua")
 dofile(MOD .. "/scripts/DroneCamSpot.lua")
+dofile(MOD .. "/scripts/DroneCamKit.lua")
 dofile(MOD .. "/scripts/DroneCamDirector.lua")
 dofile(MOD .. "/scripts/DroneCamCreator.lua")
 dofile(MOD .. "/scripts/DroneCamCamera.lua")
@@ -1055,18 +1056,45 @@ local function makeRig(spec)
         end
     end
 
+    for name, value in pairs(spec.specs or {}) do v[name] = value end
+
     local children = { v }
     for _, imp in ipairs(spec.implements or {}) do
         local child = { rootNode = newNode("implement"), size = { width = imp.width, length = imp.length, height = imp.height } }
         attach(child.rootNode, 0, 0, imp.along)
-        local half = imp.workWidth / 2
-        local front, back = imp.along + imp.workDepth / 2, imp.along - imp.workDepth / 2
-        local s, w, h = newNode("workStart"), newNode("workWidth"), newNode("workHeight")
-        attach(s, half, 0, front)
-        attach(w, -half, 0, front)
-        attach(h, half, 0, back)
-        child.spec_workArea = { workAreas = { { start = s, width = w, height = h, lastProcessingTime = -10000 } } }
-        function child:getIsWorkAreaProcessing(wa) return wa.lastProcessingTime + 200 >= g_currentMission.time end
+        if not imp.noWork then
+            local half = imp.workWidth / 2
+            local front, back = imp.along + imp.workDepth / 2, imp.along - imp.workDepth / 2
+            local s, w, h = newNode("workStart"), newNode("workWidth"), newNode("workHeight")
+            attach(s, half, 0, front)
+            attach(w, -half, 0, front)
+            attach(h, half, 0, back)
+            child.spec_workArea = { workAreas = { { start = s, width = w, height = h, lastProcessingTime = -10000 } } }
+            function child:getIsWorkAreaProcessing(wa) return wa.lastProcessingTime + 200 >= g_currentMission.time end
+        end
+        -- What it is (spec_trailer, spec_sprayer...), and the state the
+        -- game reports: lowered (if it can say), fold time (if it folds).
+        -- Read live from the spec, so a test can fold or lower it mid-pass.
+        for name, value in pairs(imp.specs or {}) do child[name] = value end
+        local parent = imp.attachedTo ~= nil and children[imp.attachedTo] or v
+        function child:getAttacherVehicle() return parent end
+        if imp.lowered ~= nil then
+            function child:getIsLowered(default) return imp.lowered end
+        end
+        if imp.fold ~= nil then
+            child.spec_foldable = {}
+            function child:getFoldAnimTime() return imp.fold end
+        end
+        if imp.wheels ~= nil then
+            child.spec_wheels = { wheels = {} }
+            for _, w in ipairs(imp.wheels) do
+                for _, s in ipairs({ -1, 1 }) do
+                    local node = newNode("wheel")
+                    attach(node, s * w.across, w.radius, w.along)
+                    child.spec_wheels.wheels[#child.spec_wheels.wheels + 1] = { driveNode = node, physics = { radius = w.radius } }
+                end
+            end
+        end
         children[#children + 1] = child
     end
     v.getChildVehicles = function() return children end
@@ -1810,14 +1838,19 @@ local LOWISH_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.w
 -- tractor (5m from the front), the rest of the underside at 0.65m.
 local HITCH_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
                         bodies = { BODY, { -0.15, 0.15, 0.53, 1.0, -3.0, -2.0 } } }
--- Trailed kit 4.5m behind, nothing on the centreline in between.
-local TOWED = { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
-                bodies = { { -2, 2, 0.3, 1.6, -11, -7 } } }
+-- A trailer 4.5m behind: body 0.9m up, an axle right across at 0.6m, its
+-- wheels just inside the tractor's.
+local TRAILER_WHEELS = { { across = 0.95, along = -9, radius = 0.5 } }
+local TOWED = { along = -9, width = 2.5, length = 4, height = 2.5, noWork = true, specs = { spec_trailer = {} },
+                wheels = TRAILER_WHEELS,
+                bodies = { { -1.25, 1.25, 0.9, 2.5, -11, -7 }, { -1.25, 1.25, 0.6, 0.7, -9.1, -8.9 } } }
 local TRAILED_CLEAR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
                         implements = { TOWED } }
--- The same with a drawbar down the middle of the gap.
-local TOWED_DRAWBAR = { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
-                        bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -0.1, 0.1, 0.4, 0.6, -7, -2.5 } } }
+-- The same with a drawbar down the middle of the gap, 0.4m up.
+local TOWED_DRAWBAR = { along = -9, width = 2.5, length = 4, height = 2.5, noWork = true, specs = { spec_trailer = {} },
+                        wheels = TRAILER_WHEELS,
+                        bodies = { { -1.25, 1.25, 0.9, 2.5, -11, -7 }, { -1.25, 1.25, 0.6, 0.7, -9.1, -8.9 },
+                                   { -0.1, 0.1, 0.4, 0.6, -7, -2.5 } } }
 local TRAILED_DRAWBAR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
                           implements = { TOWED_DRAWBAR } }
 local MOUNTED = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
@@ -1825,11 +1858,15 @@ local MOUNTED = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, 
 local COMBINE_BODY = { width = 3.6, length = 9, height = 4, wheels = COMBINE.wheels, bodies = { { -1.5, 1.5, 0.8, 4, -4.5, 4.5 } },
                        implements = COMBINE.implements }
 
----Gives a rig a work area of its own if it has nothing attached, so the
----drone flies for it.
+---Gives a rig a work area of its own if nothing attached has one (a tractor
+---alone, or pulling trailers), so the drone flies for it.
 local function makeWorking(spec)
     local v = makeRig(spec)
-    if spec.implements == nil then
+    local hasWork = false
+    for _, imp in ipairs(spec.implements or {}) do
+        if not imp.noWork then hasWork = true end
+    end
+    if not hasWork then
         v.spec_workArea = { workAreas = { { lastProcessingTime = -10000 } } }
     end
     return v
@@ -1908,28 +1945,29 @@ check("offered again once straight", available())
 startOn(LOW_TRACTOR)
 check("front weights down to 0.45m: offered, with the camera brought down to suit", available())
 startOn(MOUNTED)
-check("not offered with a mounted implement (no room to rise)", not available())
+check("not offered with a mounted cultivator (on the ground)", not available())
 startOn(TRAILED_DRAWBAR)
 check("a drawbar down the middle: offered, on a line beside it", available())
--- A shaft or top link high in the middle of the gap: the underside of the
--- tractor is fine, but there is no clear way up between tractor and kit.
-startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
-          implements = { { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
-                           bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -0.1, 0.1, 1.0, 1.2, -6, -4 } } } } })
-check("a shaft high in the gap: offered, rising beside it", available())
--- A frame right across the gap, 1.0-1.2m up: the tractor's underside is fine,
--- but there is no line to rise up through.
-startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
-          implements = { { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
-                           bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -1.5, 1.5, 1.0, 1.2, -6, -4 } } } } })
+-- A shaft high in the middle of the gap: the camera stays down under it.
+local TOWED_SHAFT = { along = -9, width = 2.5, length = 4, height = 2.5, noWork = true, specs = { spec_trailer = {} },
+                      wheels = TRAILER_WHEELS,
+                      bodies = { TOWED.bodies[1], TOWED.bodies[2], { -0.1, 0.1, 1.0, 1.2, -6, -4 } } }
+startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { TOWED_SHAFT } })
+check("a shaft high in the gap: offered, the camera stays down under it", available())
+-- A frame right across the gap, 0.3m up: no line clears it.
+local TOWED_FRAME = { along = -9, width = 2.5, length = 4, height = 2.5, noWork = true, specs = { spec_trailer = {} },
+                      wheels = TRAILER_WHEELS,
+                      bodies = { TOWED.bodies[1], TOWED.bodies[2], { -1.5, 1.5, 0.3, 0.5, -6, -4 } } }
+startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { TOWED_FRAME } })
 camera.planCache = {}
 local _, frameWhy = DroneCamCreator.plan(camera, vehicle, DRIVE_OVER, false)
-check("a frame across the whole gap: not offered, and says why",
-      (frameWhy or ""):find("drawbar or shaft in the gap behind, on every line", 1, true) ~= nil, frameWhy)
+check("a frame low across the whole gap: not offered, and says where",
+      (frameWhy or ""):find("underside too low", 1, true) ~= nil and (frameWhy or ""):find("behind the vehicle", 1, true) ~= nil,
+      frameWhy)
 startOn(TRAILED_CLEAR)
-check("offered with trailed kit and a clear gap", available())
+check("offered with a trailer behind", available())
 startOn(COMBINE_BODY)
-check("not offered with a header out front", not available())
+check("not offered with a header out front that cannot say it is raised", not available())
 
 ---Point to box distance; 0 inside.
 local function boxDistance(x, y, z, b)
@@ -1940,11 +1978,12 @@ local function boxDistance(x, y, z, b)
 end
 
 ---Runs a drive-over to the end and records what the camera did.
-local function flyDriveOver(spec, speed)
+---@param onFrame function|nil @(plan, phase, rig) every frame, to fold or lower kit mid-pass
+local function flyDriveOver(spec, speed, onFrame)
     startOn(spec, 0, speed)
     local r = { phases = {}, order = {}, swingTime = 0, swingYaw = 0, closest = math.huge, wentUnder = false,
                 lowError = 0, clipOk = true, maxStep = 0, maxTurn = 0, startPitch = nil, done = false,
-                chaseGap = nil, lowestNearTowed = math.huge, runUp = nil }
+                chaseGap = nil, underTowed = false, towedLowError = 0, runUp = nil, lostReason = nil }
     if not available() then return nil end
     camera.director:cutTo(DRIVE_OVER)
     SWING_MAX_TURN = 0
@@ -1978,18 +2017,31 @@ local function flyDriveOver(spec, speed)
         if phase == "under" and r.runUp == nil and p.underStart ~= nil then
             r.runUp = p.underStart - rigNow.rootFront
         end
-        -- How high the drive-over keeps the camera whenever towed kit is
-        -- within 1.5m of it.
+        -- Under anything towed: still down at the planned height.
         for _, box in ipairs(phase ~= nil and rigNow.boxes or {}) do
             if not box.isRoot then
                 local dx, dz = x - box.cx, z - box.cz
-                local outAlong = math.max(math.abs(dx * box.fx + dz * box.fz) - box.halfLength, 0)
-                local outAcross = math.max(math.abs(dx * box.sx + dz * box.sz) - box.halfWidth, 0)
-                if math.sqrt(outAlong ^ 2 + outAcross ^ 2) < 1.5 then
-                    r.lowestNearTowed = math.min(r.lowestNearTowed, y - (box.ground + box.height))
+                if math.abs(dx * box.fx + dz * box.fz) < box.halfLength and math.abs(dx * box.sx + dz * box.sz) < box.halfWidth then
+                    r.underTowed = true
+                    r.towedLowError = math.max(r.towedLowError, math.abs(y - TERRAIN_HEIGHT - (p.height or 0.3)))
                 end
             end
         end
+        if onFrame ~= nil and p ~= nil then onFrame(p, phase, rigNow) end
+        if phase ~= nil then
+            for _, b in ipairs(VEHICLE_BODIES) do r.closestOn = math.min(r.closestOn or math.huge, boxDistance(x, y, z, b)) end
+        elseif lastPhase ~= nil and r.firstOff == nil then
+            -- The first frame of whatever comes next: how far from the kit,
+            -- whether it is gliding, and how far from where the shot wants it.
+            r.firstOff = math.huge
+            for _, b in ipairs(VEHICLE_BODIES) do r.firstOff = math.min(r.firstOff, boxDistance(x, y, z, b)) end
+            r.firstOffGliding = camera.fromPose ~= nil
+            local wx, wy, wz = camera:getShotTransform(vehicle)
+            -- (Higher is allowed: the floors may lift it over something.)
+            local below = math.min(y - wy, 0)
+            r.firstOffGap = math.sqrt((x - wx) ^ 2 + below ^ 2 + (z - wz) ^ 2)
+        end
+        if p ~= nil and p.isLost then r.lostReason = p.lostReason end
         local across, along = DroneCamRig.toLocal(rigNow, x, z)
         if math.abs(across) < rigNow.rootHalfWidth and along < rigNow.rootFront and along > rigNow.rootRear then
             r.wentUnder = true
@@ -2013,8 +2065,8 @@ check("drive-over runs", solo ~= nil)
 if solo ~= nil then
     print(("        phases %s, swing %.2fs / %.0f deg, closest to the body %.2fm"):format(
           table.concat(solo.order, ">"), solo.swingTime, solo.swingYaw, solo.closest))
-    check("goes approach > under > swing > rise > join > tail",
-          table.concat(solo.order, ">") == "approach>under>swing>rise>join>tail", table.concat(solo.order, ">"))
+    check("goes approach > under > swing > trail > rise > join > tail",
+          table.concat(solo.order, ">") == "approach>under>swing>trail>rise>join>tail", table.concat(solo.order, ">"))
     check("looks slightly upward at the oncoming tractor", solo.startPitch ~= nil and solo.startPitch > 0 and solo.startPitch < 10,
           tostring(solo.startPitch))
     check("the tractor really drives over the camera", solo.wentUnder)
@@ -2033,17 +2085,16 @@ if solo ~= nil then
           ("%.2fm / %.2f deg"):format(solo.maxStep, solo.maxTurn))
 end
 
-print("\n-- drive-over: in flight, with trailed kit --")
--- 3.5 m/s leaves the rise only about 0.6s: it has to be paced by the kit.
+print("\n-- drive-over: in flight, with a trailer --")
 local towed = flyDriveOver(TRAILED_CLEAR, 3.5)
-check("drive-over runs with trailed kit", towed ~= nil)
+check("drive-over runs with a trailer", towed ~= nil)
 if towed ~= nil then
-    print(("        closest to any body %.2fm, lowest over the kit %.2fm"):format(towed.closest, towed.lowestNearTowed))
-    check("never touches the trailed kit", towed.closest >= 0.2, ("%.2fm"):format(towed.closest))
-    check("already risen clear when the kit comes within 1.5m", towed.lowestNearTowed >= 0.6 - 0.05,
-          ("%.2fm above it"):format(towed.lowestNearTowed))
-    check("trailed run completes", towed.done and table.concat(towed.order, ">") == "approach>under>swing>rise>join>tail",
-          table.concat(towed.order, ">"))
+    print(("        phases %s, closest to any body %.2fm"):format(table.concat(towed.order, ">"), towed.closest))
+    check("the trailer goes over the camera too", towed.underTowed)
+    check("still down at its height under the trailer", towed.towedLowError < 0.01, ("off by %.3fm"):format(towed.towedLowError))
+    check("never touches the tractor, the axle or the trailer", towed.closest >= 0.15, ("%.2fm"):format(towed.closest))
+    check("stays down until the trailer has passed, then rises", towed.done
+          and table.concat(towed.order, ">") == "approach>under>swing>trail>rise>join>tail", table.concat(towed.order, ">"))
 end
 
 print("\n-- drive-over: the tractor stops on the way --")
@@ -2110,12 +2161,12 @@ local function says(reason, text) return reason:find(text, 1, true) ~= nil end
 local _, why = reasonFor(VERY_LOW_TRACTOR)
 check("too low on every line: says so, and where", says(why, "underside too low: best line 0.30m") and says(why, "needs 0.35m"), why)
 _, why = reasonFor(MOUNTED)
-check("mounted implement: says there is no room to rise", says(why, "implement too close behind"), why)
+check("mounted cultivator: says it is on the ground", says(why, "implement on the ground"), why)
 local drawbarPlan = reasonFor(TRAILED_DRAWBAR)
 check("drawbar: the camera goes beside it, not under it", drawbarPlan ~= nil and math.abs(drawbarPlan.lineOffset) >= 0.2,
       drawbarPlan and tostring(drawbarPlan.lineOffset))
 _, why = reasonFor(COMBINE_BODY)
-check("header: says so", says(why, "implement on the front"), why)
+check("header that cannot say it is raised: counted as lowered, says so", says(why, "lowered on the front"), why)
 _, why = reasonFor(SOLO_TRACTOR, function(undo) CROP_AT = undo and function() return 0, 0 end or function() return 1, 5 end end)
 check("standing crop: says how high", says(why, "standing crop 3.2m"), why)
 _, why = reasonFor(SOLO_TRACTOR, function(undo) FIELD = (not undo) and { -100, 100, -300, 60 } or nil end)
@@ -2204,6 +2255,174 @@ local overlay = table.concat(RENDERED, "\n")
 check("the overlay shows the chosen height and line", says(overlay, "possible now - camera 0.22m up, on the centre line"), overlay)
 DroneCam.settings.showDebug = false
 
+print("\n-- drive-over: what is attached --")
+do
+    local function tractorWith(...)
+        return { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { ... } }
+    end
+    local function trailerAt(along, axle, attachedTo, wheels)
+        return { along = along, width = 2.5, length = 4, height = 2.5, noWork = true, specs = { spec_trailer = {} },
+                 attachedTo = attachedTo, wheels = wheels or { { across = 0.95, along = along, radius = 0.5 } },
+                 bodies = { { -1.25, 1.25, 0.9, 2.5, along - 2, along + 2 }, { -1.25, 1.25, axle, axle + 0.1, along - 0.1, along + 0.1 } } }
+    end
+
+    -- Two trailers: both go over the camera, and both are measured.
+    local TWO = tractorWith(trailerAt(-9, 0.6), trailerAt(-15, 0.6, 2))
+    local twoPlan, twoWhy = reasonFor(TWO)
+    check("two trailers: offered when both clear", twoPlan ~= nil, twoWhy)
+    local _, lowSecond = reasonFor(tractorWith(trailerAt(-9, 0.6), trailerAt(-15, 0.3, 2)))
+    check("the second trailer too low: turned down, and says it is the trailer",
+          says(lowSecond, "underside too low") and says(lowSecond, "under the trailer"), lowSecond)
+    local _, narrow = reasonFor(tractorWith(trailerAt(-9, 0.6, nil, { { across = 0.3, along = -9, radius = 0.4 } })))
+    check("a trailer whose wheels run down the middle: no line misses them",
+          says(narrow, "no line clear of the wheels"), narrow)
+
+    local riseAlong = nil
+    local twoFlight = flyDriveOver(TWO, 3, function(p, phase, rigNow)
+        if p.riseStarted and riseAlong == nil then riseAlong = p.along - rigNow.rear end
+    end)
+    check("two trailers: the run completes", twoFlight ~= nil and twoFlight.done)
+    if twoFlight ~= nil then
+        check("never touches either trailer", twoFlight.closest >= 0.15, ("%.2fm"):format(twoFlight.closest))
+        check("rises only once the second trailer has gone over", riseAlong ~= nil and riseAlong <= -0.3 + 0.05,
+              tostring(riseAlong))
+    end
+
+    -- A trailed sprayer, boom unfolded and lowered to 0.7m: the boom goes over
+    -- the camera as well.
+    local function sprayer(boom)
+        return { along = -9, width = 3, length = 5, height = 3, workWidth = 24, workDepth = 0.5,
+                 specs = { spec_sprayer = {} }, fold = 1, wheels = { { across = 0.95, along = -9, radius = 0.5 } },
+                 bodies = { { -1.4, 1.4, 0.9, 3, -11.5, -6.5 }, { -1.4, 1.4, 0.6, 0.7, -9.1, -8.9 },
+                            { -12, 12, boom, boom + 0.3, -11.9, -11.6 } } }
+    end
+    local SPRAYER = sprayer(0.7)
+    local sprayPlan, sprayWhy = reasonFor(tractorWith(SPRAYER))
+    check("trailed sprayer, boom unfolded: a drive-over", sprayPlan ~= nil, sprayWhy)
+    SPRAYER.fold = 0
+    check("and with the boom folded", reasonFor(tractorWith(SPRAYER)) ~= nil)
+    SPRAYER.fold = 1
+    local _, lowBoom = reasonFor(tractorWith(sprayer(0.3)))
+    check("boom set too low to clear: turned down, says it is the sprayer",
+          says(lowBoom, "underside too low") and says(lowBoom, "under the sprayer"), lowBoom)
+    local selfSprayer = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+                          specs = { spec_sprayer = {} } }
+    check("self-propelled sprayer: a drive-over", reasonFor(selfSprayer) ~= nil)
+
+    local sprayFlight = flyDriveOver(tractorWith(SPRAYER))
+    check("sprayer: the run completes", sprayFlight ~= nil and sprayFlight.done)
+    if sprayFlight ~= nil then
+        check("the sprayer and its boom go over the camera", sprayFlight.underTowed)
+        check("never touches the boom, the axle or the tank", sprayFlight.closest >= 0.15, ("%.2fm"):format(sprayFlight.closest))
+    end
+
+    -- Folding while the camera is down.
+    local folded = false
+    local onWay = flyDriveOver(tractorWith(SPRAYER), 3, function(p, phase, rigNow)
+        if phase == "approach" and camera.fromPose == nil and not folded and p.along > rigNow.front + 15 then
+            folded = true
+            SPRAYER.fold = 0.6
+        end
+    end)
+    SPRAYER.fold = 1
+    check("boom folding on the way: called off, says why", onWay ~= nil and onWay.lostReason ~= nil
+          and says(onWay.lostReason, "sprayer folding or unfolding on the way"), onWay and tostring(onWay.lostReason))
+    check("and glides away as usual", onWay ~= nil and onWay.maxStep < MAX_STEP, onWay and ("%.2fm"):format(onWay.maxStep))
+
+    folded = false
+    local midPass = flyDriveOver(tractorWith(SPRAYER), 3, function(p, phase)
+        if phase == "swing" and not folded then
+            folded = true
+            SPRAYER.fold = 0.6
+        end
+    end)
+    SPRAYER.fold = 1
+    check("boom folding during the pass: called off, says why", midPass ~= nil and midPass.lostReason ~= nil
+          and says(midPass.lostReason, "during the pass, cut away"), midPass and tostring(midPass.lostReason))
+    check("cuts straight out rather than gliding through the sprayer", midPass ~= nil and midPass.maxStep > 3
+          and (midPass.closestOn or 0) >= 0.15 and (midPass.firstOff or 0) >= 0.5,
+          midPass and ("%.2fm step, %.2fm closest, %.2fm on the cut"):format(midPass.maxStep, midPass.closestOn or -1,
+                                                                            midPass.firstOff or -1))
+    check("already at the next shot on the first frame, no glide", midPass ~= nil and midPass.firstOffGliding == false
+          and (midPass.firstOffGap or math.huge) < 1, midPass and ("gliding %s, %.2fm off"):format(
+              tostring(midPass.firstOffGliding), midPass.firstOffGap or -1))
+    check("and is not in the middle of a drive-over any more", camera.shot ~= DRIVE_OVER)
+
+    -- Slurry tanker: fine on its own, not with the dribble bar down.
+    local tanker = { along = -9, width = 2.8, length = 5, height = 3, workWidth = 2, workDepth = 0.5,
+                     specs = { spec_sprayer = { isSlurryTanker = true } }, wheels = { { across = 0.95, along = -9, radius = 0.5 } },
+                     bodies = { { -1.4, 1.4, 0.9, 3, -11.5, -6.5 }, { -1.4, 1.4, 0.6, 0.7, -9.1, -8.9 } } }
+    local function bar(lowered, bottom)
+        return { along = -12.2, width = 12, length = 1, height = 1.5, workWidth = 12, workDepth = 0.5,
+                 specs = { spec_sprayer = {} }, attachedTo = 2, lowered = lowered,
+                 bodies = { { -6, 6, bottom, 1.5, -12.7, -11.7 } } }
+    end
+    check("slurry tanker on its own: a drive-over", reasonFor(tractorWith(tanker)) ~= nil)
+    local _, barDown = reasonFor(tractorWith(tanker, bar(true, 0.2)))
+    check("dribble bar lowered: not a drive-over, says why", says(barDown, "dribble bar or injector lowered"), barDown)
+    local barUp, barUpWhy = reasonFor(tractorWith(tanker, bar(false, 1.0)))
+    check("dribble bar raised: a drive-over", barUp ~= nil, barUpWhy)
+
+    -- Kit on the ground.
+    local _, baler = reasonFor(tractorWith({ along = -6, width = 2.8, length = 4, height = 3, workWidth = 2.2, workDepth = 1,
+                                             specs = { spec_baler = {} }, lowered = false,
+                                             bodies = { { -1.4, 1.4, 0.9, 3, -8, -4 } } }))
+    check("baler: always a wheel pass", says(baler, "baler picks up off the ground"), baler)
+    local function mower(lowered)
+        return { along = -3.5, width = 3, length = 1.5, height = 1.2, workWidth = 3, workDepth = 1,
+                 specs = { spec_mower = {} }, lowered = lowered, bodies = { { -1.5, 1.5, 0.9, 1.2, -4.2, -2.8 } } }
+    end
+    local _, mowerDown = reasonFor(tractorWith(mower(true)))
+    check("mower lowered: on the ground, says so", says(mowerDown, "mower on the ground"), mowerDown)
+    local mowerUp, mowerUpWhy = reasonFor(tractorWith(mower(false)))
+    check("mower raised: off the ground, the underside decides", mowerUp ~= nil, mowerUpWhy)
+    local _, selfMower = reasonFor({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+                                     specs = { spec_mower = {} } })
+    check("self-propelled mower: works the ground itself", says(selfMower, "works the ground itself"), selfMower)
+
+    -- Combine: only with the header raised.
+    local function combineWith(header)
+        return { width = 3.6, length = 9, height = 4, wheels = COMBINE.wheels, bodies = { { -1.5, 1.5, 0.8, 4, -4.5, 4.5 } },
+                 specs = { spec_combine = {} }, implements = { header } }
+    end
+    local HEADER = { along = 5.6, width = 9, length = 2, height = 1.5, workWidth = 9, workDepth = 1.5,
+                     specs = { spec_cutter = {} }, lowered = true, bodies = { { -4.5, 4.5, 1.0, 2.0, 4.6, 6.6 } } }
+    local _, headerDown = reasonFor(combineWith(HEADER))
+    check("combine, header lowered: not a drive-over, says why", says(headerDown, "header lowered on the front"), headerDown)
+    HEADER.lowered = false
+    local headerPlan, headerWhy = reasonFor(combineWith(HEADER))
+    check("combine, header raised and clear: a drive-over", headerPlan ~= nil, headerWhy)
+    if headerPlan ~= nil then
+        local r = DroneCamRig.measure(vehicle, heading)
+        local _, spotAlong = DroneCamRig.toLocal(r, headerPlan.x, headerPlan.z)
+        check("the 30-40m is measured from the header", spotAlong - 6.6 >= 30 - 0.01, ("%.1f"):format(spotAlong))
+    end
+    local headerFlight = flyDriveOver(combineWith(HEADER))
+    check("combine: the run completes", headerFlight ~= nil and headerFlight.done)
+    if headerFlight ~= nil then
+        check("never touches the header or the combine", headerFlight.closest >= 0.15, ("%.2fm"):format(headerFlight.closest))
+    end
+    local lowered = false
+    local headerDrop = flyDriveOver(combineWith(HEADER), 3, function(p, phase, rigNow)
+        if phase == "approach" and camera.fromPose == nil and not lowered and p.along > rigNow.front + 15 then
+            lowered = true
+            HEADER.lowered = true
+        end
+    end)
+    HEADER.lowered = false
+    check("header lowered on the way: called off", headerDrop ~= nil and headerDrop.lostReason ~= nil
+          and says(headerDrop.lostReason, "header lowered on the way"), headerDrop and tostring(headerDrop.lostReason))
+
+    startOn(tractorWith(SPRAYER))
+    DroneCam.settings.showDebug = true
+    tick(1.2, true)
+    RENDERED = {}
+    DroneCam:draw()
+    local trainLine = table.concat(RENDERED, "\n")
+    check("the overlay lists the train", says(trainLine, "Train: vehicle, sprayer (fold 1.00)"), trainLine)
+    DroneCam.settings.showDebug = false
+end
+
 print("\n-- drive-over: nothing lifts the camera off the ground --")
 startOn(SOLO_TRACTOR)
 local stayedDown, ran, worst = true, false, 0
@@ -2245,7 +2464,7 @@ tick(1.2, true)
 RENDERED = {}
 DroneCam:draw()
 shown = table.concat(RENDERED, "\n")
-check("shows why the drive-over is turned down", says(shown, "Drive-over: not possible: implement too close behind"), shown)
+check("shows why the drive-over is turned down", says(shown, "Drive-over: not possible: implement on the ground"), shown)
 DroneCam:onToggleDebug()
 RENDERED = {}
 DroneCam:draw()
@@ -2291,8 +2510,8 @@ tick(32, true, 0, function()
         forcedPhases[#forcedPhases + 1] = p.phase
     end
 end)
-check("runs the whole drive-over", table.concat(forcedPhases, ">") == "under>swing>rise>join>tail"
-      or table.concat(forcedPhases, ">") == "approach>under>swing>rise>join>tail", table.concat(forcedPhases, ">"))
+check("runs the whole drive-over", table.concat(forcedPhases, ">") == "under>swing>trail>rise>join>tail"
+      or table.concat(forcedPhases, ">") == "approach>under>swing>trail>rise>join>tail", table.concat(forcedPhases, ">"))
 check("then goes back to chase", camera.shot == CHASE and camera.forcedShot == nil)
 check("and logs that it finished", logged("[DroneCam] Ctrl+G: drive-over finished"))
 
@@ -2302,10 +2521,10 @@ tick(3, true)
 DroneCam:onForceDriveOver()
 tick(1, true)
 check("Ctrl+G with a mounted implement: no drive-over", camera.shot ~= DRIVE_OVER)
-check("and says why on screen", says(onScreen(), "droneCam_driveOverNot: implement too close behind"), onScreen())
-check("and writes the reason to log.txt", logged("[DroneCam] Ctrl+G: no drive-over - implement too close behind"))
+check("and says why on screen", says(onScreen(), "droneCam_driveOverNot: implement on the ground"), onScreen())
+check("and writes the reason to log.txt", logged("[DroneCam] Ctrl+G: no drive-over - implement on the ground"))
 tick(7, true)
-check("the reason is still readable 7 seconds later", says(onScreen(), "implement too close behind"))
+check("the reason is still readable 7 seconds later", says(onScreen(), "implement on the ground"))
 
 -- A started drive-over that is dropped says so, with the reason.
 startOn(SOLO_TRACTOR)
@@ -2448,6 +2667,38 @@ check("logs why, once rather than every second", countLogged("waiting - standing
 CROP_AT = function() return 0, 0 end
 local cleared = driveMode(6, 0)
 check("goes as soon as it can", cleared.passes[1] == DRIVE_OVER)
+
+-- What is attached: a wheel pass, saying why not a drive-over.
+check("the cultivator's wheel pass says why it is not a drive-over",
+      countLogged("[DroneCam] Drive-over mode: wheel pass set up (no drive-over: implement on the ground)") >= 1)
+do
+    local LOW_SPRAYER = { along = -9, width = 3, length = 5, height = 3, workWidth = 24, workDepth = 0.5,
+                          specs = { spec_sprayer = {} }, fold = 1, wheels = { { across = 0.95, along = -9, radius = 0.5 } },
+                          bodies = { { -1.4, 1.4, 0.9, 3, -11.5, -6.5 }, { -1.4, 1.4, 0.6, 0.7, -9.1, -8.9 },
+                                     { -12, 12, 0.3, 0.6, -11.9, -11.6 } } }
+    startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY }, implements = { LOW_SPRAYER } })
+    DroneCam.settings.mode = MODE_DO
+    local lowSpray = driveMode(8, 0)
+    check("sprayer with the boom too low: a wheel pass instead", lowSpray.passes[1] == WHEEL_PASS, tostring(lowSpray.passes[1]))
+    check("and says why not a drive-over",
+          countLogged("wheel pass set up (no drive-over: underside too low") >= 1)
+
+    -- The boom unfolds as the sprayer comes level with the camera beside it.
+    local cutAway, folded = false, false
+    tick(30, true, 0, function()
+        local p = camera.plan
+        if camera.shot == WHEEL_PASS and p ~= nil and p.phase == "pass" and not folded then
+            folded = true
+            LOW_SPRAYER.fold = 0.4
+        end
+        if p ~= nil and p.lostReason ~= nil and says(p.lostReason, "sprayer folding or unfolding during the pass, cut away") then
+            cutAway = true
+        end
+    end)
+    LOW_SPRAYER.fold = 1
+    check("a boom unfolding beside the camera: the wheel pass is cut away", folded and cutAway)
+    check("and logged", countLogged("wheel pass dropped: sprayer folding or unfolding during the pass, cut away") >= 1)
+end
 
 -- No room before the row end: waits on the chase, says so.
 startOn(SOLO_TRACTOR)

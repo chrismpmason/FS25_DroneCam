@@ -24,6 +24,7 @@ Three camera modes: Chase, Top-down and Orbit. Height is clamped above the terra
         <sourceFile filename="scripts/DroneCamRig.lua"/>
         <sourceFile filename="scripts/DroneCamField.lua"/>
         <sourceFile filename="scripts/DroneCamSpot.lua"/>
+        <sourceFile filename="scripts/DroneCamKit.lua"/>
         <sourceFile filename="scripts/DroneCamDirector.lua"/>
         <sourceFile filename="scripts/DroneCamCreator.lua"/>
         <sourceFile filename="scripts/DroneCamCamera.lua"/>

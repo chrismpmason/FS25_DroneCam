@@ -198,6 +198,7 @@ function DroneCamRig.measure(vehicle, heading)
 
             if box ~= nil then
                 box.isRoot = child == vehicle
+                box.vehicle = child
                 rig.boxes[#rig.boxes + 1] = box
 
                 for _, cornerX in ipairs({ -1, 1 }) do
@@ -237,6 +238,14 @@ function DroneCamRig.measure(vehicle, heading)
 
     rig.front, rig.rear, rig.halfWidth = front, rear, halfWidth
 
+    -- Front-mounted (weights, a header, a front mower) or behind.
+    for i = 1, #rig.boxes do
+        local box = rig.boxes[i]
+        local _, centreAlong = DroneCamRig.toLocal(rig, box.cx, box.cz)
+        box.centreAlong = centreAlong
+        box.isFront = not box.isRoot and centreAlong >= rig.rootRear
+    end
+
     local rootLength = rig.rootFront - rig.rootRear
     rig.scale = math.min(math.max(
         rootLength / DroneCamRig.REFERENCE_LENGTH,
@@ -263,6 +272,16 @@ function DroneCamRig.measure(vehicle, heading)
     end
 
     rig.wheels = getWheels(rig, vehicle)
+
+    -- Everything else's wheels: the drive-over's line must miss them too.
+    rig.trainWheels = {}
+    for i = 1, #vehicles do
+        if vehicles[i] ~= vehicle and vehicles[i].rootNode ~= nil and entityExists(vehicles[i].rootNode) then
+            for _, wheel in ipairs(getWheels(rig, vehicles[i])) do
+                rig.trainWheels[#rig.trainWheels + 1] = wheel
+            end
+        end
+    end
 
     return rig
 end
@@ -303,9 +322,9 @@ end
 ---Lowest height the camera may have at (x, z) without being inside, or
 ---within the hard margin of, any vehicle in the rig.
 ---@param soft boolean @Also ease the requirement down over SOFT_FADE beyond the margin
----@param skipRoot boolean|nil @Ignore the controlled vehicle itself (the drive-over goes under it)
+---@param skipTrain boolean|nil @Ignore every vehicle in the train (the drive-over goes under all of it)
 ---@return number @Minimum world height, or -math.huge where nothing applies
-function DroneCamRig.getVehicleFloor(rig, x, z, soft, skipRoot)
+function DroneCamRig.getVehicleFloor(rig, x, z, soft, skipTrain)
     local floor = -math.huge
     local margin = DroneCamRig.HARD_MARGIN
     local fade = DroneCamRig.SOFT_FADE
@@ -313,7 +332,7 @@ function DroneCamRig.getVehicleFloor(rig, x, z, soft, skipRoot)
     for i = 1, #rig.boxes do
         local box = rig.boxes[i]
 
-        if not (skipRoot and box.isRoot) then
+        if not skipTrain then
             local distance = getDistanceOutside(box, x, z)
             local top = box.ground + box.height + margin
 
@@ -329,8 +348,8 @@ function DroneCamRig.getVehicleFloor(rig, x, z, soft, skipRoot)
 end
 
 ---@param soft boolean @Count the eased zone beyond the margin as well
----@param skipRoot boolean|nil @Ignore the controlled vehicle itself
+---@param skipTrain boolean|nil @Ignore every vehicle in the train
 ---@return boolean @True if the point is below the vehicle floor at its position
-function DroneCamRig.getIsInsideVehicle(rig, x, y, z, soft, skipRoot)
-    return y < DroneCamRig.getVehicleFloor(rig, x, z, soft, skipRoot)
+function DroneCamRig.getIsInsideVehicle(rig, x, y, z, soft, skipTrain)
+    return y < DroneCamRig.getVehicleFloor(rig, x, z, soft, skipTrain)
 end
