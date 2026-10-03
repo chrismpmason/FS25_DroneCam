@@ -233,16 +233,23 @@ local function planEstablishing(camera, vehicle, rig)
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
     local aimX, aimY, aimZ = getVehicleAim(vehicle)
 
-    local field = DroneCamField.probe(vx, vz)
+    -- The game's own outline of the field when there is one, otherwise the
+    -- edges found by sampling.
     local centreX, centreZ, radius = vx, vz, DroneCamCreator.ESTABLISHING_FALLBACK_RADIUS
-    if field ~= nil then
-        centreX, centreZ = field.x, field.z
-        radius = math.min(math.max(field.radius, DroneCamCreator.ESTABLISHING_MIN_RADIUS), DroneCamCreator.ESTABLISHING_MAX_RADIUS)
+    local info = camera.fieldInfo
+    if info ~= nil then
+        centreX, centreZ, radius = info.centreX, info.centreZ, info.length * 0.5
+    else
+        local field = DroneCamField.probe(vx, vz)
+        if field ~= nil then
+            centreX, centreZ, radius = field.x, field.z, field.radius
+        end
     end
+    radius = math.min(math.max(radius, DroneCamCreator.ESTABLISHING_MIN_RADIUS), DroneCamCreator.ESTABLISHING_MAX_RADIUS)
 
     local ground = getTerrainHeight(centreX, centreZ, vy)
-    local distance = math.max(radius * DroneCamCreator.ESTABLISHING_DISTANCE_FACTOR, DroneCamCreator.ESTABLISHING_MIN_DISTANCE)
-    local height = math.max(radius * DroneCamCreator.ESTABLISHING_HEIGHT_FACTOR, DroneCamCreator.ESTABLISHING_MIN_HEIGHT)
+    local distance = camera:capReach(math.max(radius * DroneCamCreator.ESTABLISHING_DISTANCE_FACTOR, DroneCamCreator.ESTABLISHING_MIN_DISTANCE))
+    local height = camera:capHeight(math.max(radius * DroneCamCreator.ESTABLISHING_HEIGHT_FACTOR, DroneCamCreator.ESTABLISHING_MIN_HEIGHT))
 
     -- Start behind the vehicle's line of travel and work round both ways.
     local base = camera.heading + math.pi
@@ -275,7 +282,7 @@ end
 
 local function planLongLens(camera, vehicle, rig)
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
-    local distance = DroneCamCreator.LONG_LENS_DISTANCE * math.min(math.max(rig.scale, 1), 2)
+    local distance = camera:capReach(DroneCamCreator.LONG_LENS_DISTANCE * math.min(math.max(rig.scale, 1), 2))
     local first = pickFirstSide(camera)
 
     local candidates = {}
@@ -794,23 +801,33 @@ local function getMovingPath(camera, rig, shot, progress)
         topHeight = math.max(topHeight, rig.boxes[i].ground + rig.boxes[i].height - rig.ground)
     end
 
+    -- Far points are pulled in to keep within the field (camera:capReach),
+    -- keeping their direction from the vehicle.
+    local function fit(distance)
+        return distance > 0 and camera:capReach(distance) / distance or 1
+    end
+
     if shot == S.SHOT_PUSH_IN then
-        return lerp(side * 30, 0, eased), lerp(-150, -settings.chaseDistance, eased), lerp(60, settings.chaseHeight, eased),
+        local k = fit(math.sqrt(150 * 150 + 30 * 30))
+        return lerp(side * 30 * k, 0, eased), lerp(-150 * k, -camera:capReach(settings.chaseDistance), eased),
+               lerp(camera:capHeight(60), camera:capHeight(settings.chaseHeight), eased),
                lerp(0, settings.chaseLookAhead, eased)
     elseif shot == S.SHOT_PULL_OUT then
         local startAcross = side * (rig.halfWidth + math.max(gap, 3.5 * scale))
-        return lerp(startAcross, side * 25 * scale, eased),
-               lerp(rig.rootFront + 4 * scale, rig.front + 45 * scale, eased),
-               lerp(1.8 * scale, 35 * scale, eased), 0
+        local k = fit(math.sqrt(25 * 25 + 45 * 45) * scale)
+        return lerp(startAcross, side * 25 * scale * k, eased),
+               lerp(rig.rootFront + 4 * scale, rig.front + 45 * scale * k, eased),
+               lerp(1.8 * scale, camera:capHeight(35 * scale), eased), 0
     elseif shot == S.SHOT_FLY_OVER then
         return side * 2, lerp(rig.front + 25 * scale, rig.rear - 25 * scale, eased), topHeight + 5 * scale, 0
     elseif shot == S.SHOT_RISE_UP then
         local startAlong = rig.rear - math.max(gap, 5 * scale)
-        return 0, lerp(startAlong, 0, eased), lerp(2 * scale, settings.topDownHeight, eased), 0
+        return 0, lerp(startAlong, 0, eased), lerp(2 * scale, camera:capHeight(settings.topDownHeight), eased), 0
     end
 
     -- Slide.
-    return side * 70 * scale, lerp(40 * scale, -40 * scale, eased), 10 * scale, 0
+    local k = fit(math.sqrt(70 * 70 + 40 * 40) * scale)
+    return side * 70 * scale * k, lerp(40 * scale * k, -40 * scale * k, eased), camera:capHeight(10 * scale), 0
 end
 
 ---Camera transform for a creator shot.

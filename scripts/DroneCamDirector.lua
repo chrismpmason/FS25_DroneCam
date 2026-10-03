@@ -79,6 +79,41 @@ DroneCamDirector.STORY_USUAL_CHANCE = 0.65
 DroneCamDirector.STORY_CLOSE_UPS_MIN = 2
 DroneCamDirector.STORY_CLOSE_UPS_MAX = 3
 
+---The story is tuned to the size of the field (DroneCamField.getSizeClass).
+---Medium is the story above. A small field gets chase where the
+---establishing shot would be, more close-ups, the drive-over more often and
+---no long pull-out; a large one plays the big shots more often (establishing,
+---push-in, pull-out reveal), fewer close-ups, and a long lens to end each loop.
+DroneCamDirector.STORIES = {
+    small = {
+        steps = {
+            { S.MODE_CHASE, S.SHOT_ESTABLISHING, S.SHOT_EDGE_PAN },
+            { S.SHOT_RISE_UP, S.SHOT_PUSH_IN },
+            DroneCamDirector.CLOSE_UPS,
+            { S.SHOT_FLY_OVER, S.SHOT_SLIDE },
+            { S.MODE_ORBIT, S.MODE_CHASE }
+        },
+        usualChance = 0.65, closeUpsMin = 3, closeUpsMax = 4, heroStep = 4, heroChance = 0.6
+    },
+    medium = {
+        steps = DroneCamDirector.STORY,
+        usualChance = DroneCamDirector.STORY_USUAL_CHANCE,
+        closeUpsMin = DroneCamDirector.STORY_CLOSE_UPS_MIN, closeUpsMax = DroneCamDirector.STORY_CLOSE_UPS_MAX,
+        heroStep = DroneCamDirector.HERO_STEP, heroChance = DroneCamDirector.HERO_CHANCE
+    },
+    large = {
+        steps = {
+            { S.SHOT_ESTABLISHING, S.SHOT_LONG_LENS, S.SHOT_EDGE_PAN },
+            { S.SHOT_PUSH_IN, S.SHOT_RISE_UP },
+            DroneCamDirector.CLOSE_UPS,
+            { S.SHOT_FLY_OVER, S.SHOT_SLIDE },
+            { S.SHOT_PULL_OUT, S.MODE_ORBIT },
+            { S.SHOT_LONG_LENS, S.SHOT_ESTABLISHING }
+        },
+        usualChance = 0.8, closeUpsMin = 2, closeUpsMax = 2, heroStep = 4, heroChance = DroneCamDirector.HERO_CHANCE
+    }
+}
+
 ---Chance that the next shot in random mode comes from the other group (wide
 ---after a close-up, close-up after a wide). Below 1 so the pattern is not
 ---mechanical.
@@ -169,6 +204,9 @@ function DroneCamDirector:reset()
     self.storyStep = 1
     self.closeUpsLeft = nil
     self.heroThisLoop = false
+    -- Set by the camera from the field being worked.
+    self.fieldClass = self.fieldClass or "medium"
+    self.story = DroneCamDirector.STORIES.medium
 end
 
 ---@return boolean
@@ -207,7 +245,7 @@ function DroneCamDirector:start(initialShot, heading, isStory)
     self.isStory = isStory == true
     self.storyStep = 1
     self.closeUpsLeft = nil
-    self:rollHero()
+    self:startLoop()
 
     if contains(DroneCamDirector.STATIC_WIDE_SHOTS, initialShot) then
         self:cutTo(initialShot)
@@ -229,7 +267,7 @@ function DroneCamDirector:setStory(isStory)
         self.isStory = isStory
         self.storyStep = 1
         self.closeUpsLeft = nil
-        self:rollHero()
+        self:startLoop()
     end
 end
 
@@ -275,29 +313,33 @@ function DroneCamDirector:pickFrom(list)
     return candidates[self.random(#candidates)]
 end
 
----Decides whether this loop of the story gets a hero shot.
-function DroneCamDirector:rollHero()
-    self.heroThisLoop = self.random() < DroneCamDirector.HERO_CHANCE
+---Starts a loop of the story: takes up the story for the field being worked
+---(a change of field never rearranges a loop half way through) and decides
+---whether this loop gets a hero shot.
+function DroneCamDirector:startLoop()
+    self.story = DroneCamDirector.STORIES[self.fieldClass] or DroneCamDirector.STORIES.medium
+    self.heroThisLoop = self.random() < self.story.heroChance
 end
 
 function DroneCamDirector:advanceStory()
     self.closeUpsLeft = nil
-    self.storyStep = self.storyStep % #DroneCamDirector.STORY + 1
+    self.storyStep = self.storyStep % #self.story.steps + 1
     if self.storyStep == 1 then
-        self:rollHero()
+        self:startLoop()
     end
 end
 
 ---Next shot of the story, skipping steps that have nothing available.
 ---@return integer
 function DroneCamDirector:pickStoryShot()
-    for _ = 1, #DroneCamDirector.STORY do
-        local step = DroneCamDirector.STORY[self.storyStep]
+    for _ = 1, #self.story.steps do
+        local story = self.story
+        local step = story.steps[self.storyStep]
 
         if step == DroneCamDirector.CLOSE_UPS then
             if self.closeUpsLeft == nil then
-                local spread = DroneCamDirector.STORY_CLOSE_UPS_MAX - DroneCamDirector.STORY_CLOSE_UPS_MIN + 1
-                self.closeUpsLeft = DroneCamDirector.STORY_CLOSE_UPS_MIN + math.min(math.floor(self.random() * spread), spread - 1)
+                local spread = story.closeUpsMax - story.closeUpsMin + 1
+                self.closeUpsLeft = story.closeUpsMin + math.min(math.floor(self.random() * spread), spread - 1)
             end
 
             local shot = self:pickFrom(DroneCamDirector.CLOSE_SHOTS)
@@ -308,7 +350,7 @@ function DroneCamDirector:pickStoryShot()
                 end
                 return shot
             end
-        elseif self.storyStep == DroneCamDirector.HERO_STEP and self.heroThisLoop
+        elseif self.storyStep == story.heroStep and self.heroThisLoop
             and self:pickFrom(DroneCamDirector.HERO_SHOTS) ~= nil then
             -- This loop's hero shot, in place of the usual step.
             local shot = self:pickFrom(DroneCamDirector.HERO_SHOTS)
@@ -318,7 +360,7 @@ function DroneCamDirector:pickStoryShot()
             -- Usual shot first most of the time, otherwise a random stand-in
             -- first; either way the rest follow in case the first is unavailable.
             local order = {}
-            if self.random() < DroneCamDirector.STORY_USUAL_CHANCE or #step == 1 then
+            if self.random() < story.usualChance or #step == 1 then
                 order[1] = step[1]
             else
                 order[1] = step[1 + self.random(#step - 1)]
@@ -361,7 +403,7 @@ function DroneCamDirector:pickNextShot(isTurnStarting)
     if isTurnStarting then
         -- A run of close-ups is cut short by the turn; the story carries on
         -- from the step after it once the vehicle is straight again.
-        if self.isStory and DroneCamDirector.STORY[self.storyStep] == DroneCamDirector.CLOSE_UPS then
+        if self.isStory and self.story.steps[self.storyStep] == DroneCamDirector.CLOSE_UPS then
             self:advanceStory()
         end
         return self:pickFrom(DroneCamDirector.TURN_SHOTS) or DroneCamSettings.MODE_CHASE

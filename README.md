@@ -38,6 +38,20 @@ close-ups 6–10; nothing repeats twice in a row; the headland shot is taken as
 the row end comes up; nothing changes during a headland turn; and a close-up
 gives way to a steady wide shot as soon as a turn begins.
 
+**Field-size aware.** The field being worked is looked up in the game's own
+field data (its outline and area) and sorted into small (under 2 ha), medium
+(2–10 ha) or large (over 10 ha); both limits are settings (`fieldSmallHa`,
+`fieldLargeHa` in `modSettings/FS25_DroneCam.xml`). Wide shots never pull out
+much further than the field's longest dimension (never under 40m, so chase and
+orbit keep their usual framing), heights are held to match, and the limit eases
+in or out at no more than 40 m/s when you cross into another field. Story mode
+adjusts its mix: on a small field chase opens each loop, there are three or four
+close-ups, the drive-over plays in about six loops in ten, and orbit or chase
+replaces the long pull-out; on a large field the establishing, push-in and
+pull-out shots play more often, there are two close-ups, and each loop ends on a
+long lens. Medium fields, and anywhere no field is found, get the usual mix. A
+change of field takes effect at the start of the next loop.
+
 Fixed spots are checked before use: never inside or under a tree or building,
 never tight against a wall, and with a clear line of sight past terrain, trees
 and buildings to where the vehicle is and will be over the next ten seconds. A
@@ -105,7 +119,7 @@ scripts/DroneCamCamera.lua       camera node, smoothing, angles and blends
 scripts/DroneCamDirector.lua     Auto director: story and random, timing, turn rules
 scripts/DroneCamCreator.lua      creator shots and drive-over: planning, paths, zoom
 scripts/DroneCamRig.lua          vehicle + implement measurement, vehicle floor
-scripts/DroneCamField.lua        field edges and extent
+scripts/DroneCamField.lua        game field lookup, size class, field edges
 scripts/DroneCamSpot.lua         fixed-spot checks: clear spot, line of sight
 scripts/DroneCamWorkDetect.lua   field-work detection and hysteresis
 scripts/DroneCamSettings.lua     defaults and XML persistence

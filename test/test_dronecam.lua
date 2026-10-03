@@ -2118,6 +2118,261 @@ driveVehicle(plainVehicle)
 VEHICLE_BODIES = {}
 end)()
 
+--------------------------------------------------------- field-size aware
+
+-- In a function of its own: Lua 5.1 allows only 200 locals per function.
+-- (The leading semicolon stops Lua reading it as a call on the line before.)
+;(function()
+local camera = DroneCam.camera
+local cn = camera:getCameraNode()
+local S = DroneCamSettings
+
+---A game field: a rectangle outline of nodes, with its area.
+local function makeField(minX, maxX, minZ, maxZ)
+    local points = {}
+    for _, corner in ipairs({ { minX, minZ }, { maxX, minZ }, { maxX, maxZ }, { minX, maxZ } }) do
+        local node = newNode("fieldPoint")
+        nodes[node].x, nodes[node].z = corner[1], corner[2]
+        points[#points + 1] = node
+    end
+    local field = { areaHa = (maxX - minX) * (maxZ - minZ) / 10000, rect = { minX, maxX, minZ, maxZ } }
+    function field:getPolygonPoints() return points end
+    function field:getCenterOfFieldWorldPosition() return (minX + maxX) / 2, (minZ + maxZ) / 2 end
+    return field
+end
+
+local SMALL_FIELD = makeField(2000, 2060, 0, 100)      -- 0.6 ha, 117m across
+local MEDIUM_FIELD = makeField(3000, 3200, 0, 300)     -- 6 ha
+local LARGE_FIELD = makeField(4000, 4400, -500, 500)   -- 40 ha
+g_fieldManager = { fields = { SMALL_FIELD, MEDIUM_FIELD, LARGE_FIELD } }
+
+print("\n-- field size: detection --")
+local small = DroneCamField.getFieldInfo(2030, 50)
+local medium = DroneCamField.getFieldInfo(3100, 150)
+local large = DroneCamField.getFieldInfo(4200, 0)
+check("finds the field being worked from the game's field data",
+      small ~= nil and small.field == SMALL_FIELD and medium.field == MEDIUM_FIELD and large.field == LARGE_FIELD)
+check("reads its area", math.abs(small.areaHa - 0.6) < 1e-9 and math.abs(large.areaHa - 40) < 1e-9)
+check("measures its longest dimension", math.abs(small.length - math.sqrt(60 ^ 2 + 100 ^ 2)) < 0.01
+      and math.abs(large.length - math.sqrt(400 ^ 2 + 1000 ^ 2)) < 0.01, ("%.1f"):format(small.length))
+check("finds its centre", small.centreX == 2030 and small.centreZ == 50)
+local settings = DroneCam.settings
+check("sorts fields into small, medium and large",
+      DroneCamField.getSizeClass(small, settings) == "small" and DroneCamField.getSizeClass(medium, settings) == "medium"
+      and DroneCamField.getSizeClass(large, settings) == "large")
+check("medium when no field is found", DroneCamField.getFieldInfo(9000, 9000) == nil
+      and DroneCamField.getSizeClass(nil, settings) == "medium")
+settings.fieldSmallHa, settings.fieldLargeHa = 0.5, 50
+check("the limits are settings you can tune",
+      DroneCamField.getSizeClass(small, settings) == "medium" and DroneCamField.getSizeClass(large, settings) == "medium")
+settings.fieldSmallHa, settings.fieldLargeHa = 2, 10
+
+-- The game's quick lookup: farmland at a point, and the field on it.
+g_farmlandManager = { getFarmlandAtWorldPosition = function(self, x, z) return { id = 7 } end }
+g_fieldManager.farmlandIdFieldMapping = { [7] = MEDIUM_FIELD }
+check("uses the farmland lookup when it fits", DroneCamField.getGameField(3100, 150) == MEDIUM_FIELD)
+check("and falls back when the farmland's field is elsewhere", DroneCamField.getGameField(2030, 50) == SMALL_FIELD)
+g_farmlandManager = nil
+g_fieldManager.farmlandIdFieldMapping = nil
+
+print("\n-- field size: story mixes --")
+local function makeWH(seed)
+    local s1, s2, s3 = seed % 30000 + 1, (seed * 7) % 30000 + 1, (seed * 13) % 30000 + 1
+    return function(n)
+        s1 = (171 * s1) % 30269
+        s2 = (172 * s2) % 30307
+        s3 = (170 * s3) % 30323
+        local f = (s1 / 30269 + s2 / 30307 + s3 / 30323) % 1
+        if n == nil then return f end
+        return math.floor(f * n) + 1
+    end
+end
+
+---Runs a story director for a field class and counts what it shows.
+local function mix(class)
+    local d = DroneCamDirector.new(settings)
+    d.random = makeWH(2468)
+    d.fieldClass = class
+    d.isShotAvailable = function(shot) return shot ~= HEADLAND end
+    d.isShotStillUsable = function(shot)
+        if shot == S.SHOT_DRIVE_OVER then return d.shotTime < 12 end
+        return true
+    end
+    d:start(nil, 0, true)
+    local stats = survey(d, 6000)
+    local counts, total, loops = {}, 0, 0
+    for i, shot in ipairs(stats.order) do
+        counts[shot] = (counts[shot] or 0) + 1
+        total = total + 1
+        if i > 1 and shot == d.story.steps[1][1] then loops = loops + 1 end
+    end
+    local close = 0
+    for _, shot in ipairs(DroneCamDirector.CLOSE_SHOTS) do close = close + (counts[shot] or 0) end
+    -- Every loop has exactly one run of close-ups, so runs count loops.
+    local runs = 0
+    for i = 2, #stats.order do
+        if isClose(stats.order[i]) and not isClose(stats.order[i - 1]) then runs = runs + 1 end
+    end
+    local function share(...)
+        local n = 0
+        for _, shot in ipairs({ ... }) do n = n + (counts[shot] or 0) end
+        return n / total
+    end
+    return {
+        close = close / total,
+        chase = share(S.MODE_CHASE),
+        establishing = share(S.SHOT_ESTABLISHING, S.SHOT_LONG_LENS),
+        big = share(S.SHOT_ESTABLISHING, S.SHOT_LONG_LENS, S.SHOT_PUSH_IN, S.SHOT_PULL_OUT),
+        pullOut = counts[S.SHOT_PULL_OUT] or 0,
+        driveOverPerLoop = (counts[S.SHOT_DRIVE_OVER] or 0) / math.max(runs, 1),
+        story = d.story
+    }
+end
+
+local smallMix, mediumMix, largeMix = mix("small"), mix("medium"), mix("large")
+print(("        close-ups %.0f/%.0f/%.0f%%, establishing+long lens %.0f/%.0f/%.0f%%, big shots %.0f/%.0f/%.0f%% (small/medium/large)"):format(
+      smallMix.close * 100, mediumMix.close * 100, largeMix.close * 100,
+      smallMix.establishing * 100, mediumMix.establishing * 100, largeMix.establishing * 100,
+      smallMix.big * 100, mediumMix.big * 100, largeMix.big * 100))
+check("medium plays the usual story", mediumMix.story == DroneCamDirector.STORIES.medium
+      and DroneCamDirector.STORIES.medium.steps == DroneCamDirector.STORY)
+check("small: more close-ups", smallMix.close > mediumMix.close + 0.05)
+check("small: more chase", smallMix.chase > mediumMix.chase + 0.05)
+check("small: drive-over in more loops (about 60% against 33%)",
+      smallMix.driveOverPerLoop > 0.5 and smallMix.driveOverPerLoop < 0.72
+      and mediumMix.driveOverPerLoop > 0.22 and mediumMix.driveOverPerLoop < 0.45,
+      ("%.2f vs %.2f per loop"):format(smallMix.driveOverPerLoop, mediumMix.driveOverPerLoop))
+check("small: fewer establishing and long lens shots", smallMix.establishing < mediumMix.establishing * 0.6)
+check("small: no long pull-outs", smallMix.pullOut == 0)
+check("large: more establishing, push-ins, pull-outs and long lens", largeMix.big > mediumMix.big + 0.05)
+check("large: more long lens and establishing on their own", largeMix.establishing > mediumMix.establishing * 1.3)
+check("large: fewer close-ups", largeMix.close < mediumMix.close - 0.03)
+
+print("\n-- field size: a change of field waits for the next loop --")
+local switcher = DroneCamDirector.new(settings)
+switcher.random = makeWH(99)
+switcher.fieldClass = "small"
+switcher.isShotAvailable = function(shot) return shot ~= HEADLAND and shot ~= S.SHOT_DRIVE_OVER end
+switcher:start(nil, 0, true)
+check("starts on the small-field story", switcher.story == DroneCamDirector.STORIES.small)
+-- Into the second step, then the field changes.
+local guard = 0
+while switcher.storyStep == 1 and guard < 4000 do switcher:update(0.05, 0); guard = guard + 1 end
+switcher.fieldClass = "large"
+local stayed = true
+guard = 0
+while switcher.storyStep ~= 1 and guard < 20000 do
+    switcher:update(0.05, 0)
+    if switcher.storyStep ~= 1 and switcher.story ~= DroneCamDirector.STORIES.small then stayed = false end
+    guard = guard + 1
+end
+check("keeps the small-field story to the end of the loop", stayed)
+check("then takes up the large-field story", switcher.story == DroneCamDirector.STORIES.large)
+
+---Drives the cultivator rig north through a field at 2.5 m/s in story mode
+---and records how far out the camera goes.
+local function flyField(field, seconds)
+    local r = field.rect
+    FIELD = { r[1], r[2], r[3], r[4] }
+    OBSTACLES = {}
+    vehicle = makeRig(TRACTOR)
+    VEHICLE_SPEED = 2.5
+    tick(12, false)
+    nodes[vehicle.rootNode].x, nodes[vehicle.rootNode].z = (r[1] + r[2]) / 2, r[3] + 8
+    heading = 0
+    DroneCam.settings.mode = AUTO
+    camera.director.random = makeWH(1357)
+    local result = { farthest = 0, highest = 0, maxStep = 0, maxTurn = 0 }
+    local px, py, pz = getWorldTranslation(cn)
+    local prx, pry = nodes[cn].rx, nodes[cn].ry
+    local was = false
+    tick(seconds, true, 0, function()
+        local x, y, z = getWorldTranslation(cn)
+        local rx, ry = nodes[cn].rx, nodes[cn].ry
+        local flying = droneIsActive()
+        if flying and was then
+            local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+            result.farthest = math.max(result.farthest, math.sqrt((x - vx) ^ 2 + (z - vz) ^ 2))
+            result.highest = math.max(result.highest, y - vy)
+            result.maxStep = math.max(result.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
+            result.maxTurn = math.max(result.maxTurn, countTurn(math.max(math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))))
+        end
+        was, px, py, pz, prx, pry = flying, x, y, z, rx, ry
+    end)
+    result.class = camera.fieldClass
+    result.reach = camera.fieldReach
+    result.directorClass = camera.director.fieldClass
+    return result
+end
+
+print("\n-- field size: in flight --")
+for _, case in ipairs({ { SMALL_FIELD, "small", 34 }, { MEDIUM_FIELD, "medium", 100 }, { LARGE_FIELD, "large", 150 } }) do
+    local field, class, seconds = case[1], case[2], case[3]
+    local flight = flyField(field, seconds)
+    local info = DroneCamField.getFieldInfo(field.rect[1] + 1, field.rect[3] + 1)
+    local reach = math.max(info.length, DroneCamCamera.FIELD_MIN_REACH)
+    print(("        %s: farthest %.0fm of %.0fm reach, highest %.0fm, worst frame %.2fm / %.2f deg"):format(
+          class, flight.farthest, reach, flight.highest, flight.maxStep, flight.maxTurn))
+    check(class .. " field is recognised in flight", flight.class == class and flight.directorClass == class)
+    check(class .. ": shots stay within the field's reach", flight.farthest <= reach * 1.1 + 10,
+          ("%.0fm for a %.0fm field"):format(flight.farthest, reach))
+    check(class .. ": smooth", flight.maxStep < MAX_STEP and flight.maxTurn < MAX_TURN,
+          ("%.2fm / %.2f deg"):format(flight.maxStep, flight.maxTurn))
+end
+
+print("\n-- field size: shots pulled in on a small field --")
+local flight = flyField(SMALL_FIELD, 6)
+local reach = camera.fieldReach
+check("reach is set by the small field", math.abs(reach - math.sqrt(60 ^ 2 + 100 ^ 2)) < 1, ("%.1f"):format(reach))
+camera.shotSide = 1
+camera.shotDuration, camera.shotElapsed = 10, 0
+camera.rig = nil
+local pushX, pushY, pushZ = DroneCamCreator.getTransform(camera, vehicle, S.SHOT_PUSH_IN)
+local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+local pushFrom = math.sqrt((pushX - vx) ^ 2 + (pushZ - vz) ^ 2)
+check("push-in starts inside the field's reach, not 150m out", pushFrom <= reach + 1, ("%.0fm"):format(pushFrom))
+camera.shotElapsed = 10
+local slideX, _, slideZ = DroneCamCreator.getTransform(camera, vehicle, S.SHOT_SLIDE)
+check("slide stays within reach", math.sqrt((slideX - vx) ^ 2 + (slideZ - vz) ^ 2) <= reach + 1)
+camera.planCache = {}
+local lens = camera:getPlan(S.SHOT_LONG_LENS)
+check("long lens stands within reach", lens == nil or math.sqrt((lens.x - vx) ^ 2 + (lens.z - vz) ^ 2) <= reach + 1)
+local est = camera:getPlan(S.SHOT_ESTABLISHING)
+check("establishing frames the game's field, within reach", est ~= nil and est.centreX == 2030 and est.centreZ == 50
+      and est.distance <= reach + 1)
+-- A tiny 40m x 50m paddock (0.2 ha): 64m across, so heights are held to
+-- about 38m, well under the usual 60m top-down.
+local TINY_FIELD = makeField(6000, 6040, 0, 50)
+g_fieldManager.fields[#g_fieldManager.fields + 1] = TINY_FIELD
+flyField(TINY_FIELD, 5)
+vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+local topDownHeight = select(2, camera:getModeTransform(vehicle, S.MODE_TOPDOWN)) - vy
+check("top-down comes down for a tiny field", topDownHeight < 40, ("%.1fm"):format(topDownHeight))
+local _, chaseY = camera:getModeTransform(vehicle, S.MODE_CHASE)
+check("chase keeps its usual 25m height", math.abs(chaseY - vy - 25) < 1e-6)
+
+print("\n-- field size: no field --")
+-- Still flying over the small field; now the game stops reporting a field.
+local fields = g_fieldManager.fields
+g_fieldManager.fields = {}
+local before = camera.fieldReach
+tick(1.1, true)
+check("no field found: medium mix", camera.fieldClass == "medium" and camera.director.fieldClass == "medium")
+-- A fixed expectation, not the mod's own constant: about 40 m/s at most.
+check("and the limit eases off rather than jumping", camera.fieldReach > before
+      and camera.fieldReach - before <= 40 * 1.1 + 1, ("%.0f -> %.0f"):format(before, camera.fieldReach))
+g_fieldManager.fields = fields
+local noField = flyField({ rect = { 8000, 8100, 0, 300 } }, 4)
+check("flying with no field at all: medium mix, no limit", noField.class == "medium"
+      and camera.fieldReach == DroneCamCamera.FIELD_NO_LIMIT)
+
+g_fieldManager = nil
+FIELD, OBSTACLES = nil, {}
+DroneCam.settings.mode = CHASE
+VEHICLE_SPEED = 8
+driveVehicle(plainVehicle)
+end)()
+
 print("\n-- settings round trip --")
 DroneCam.settings.chaseDistance = 55
 DroneCam.settings.sway = false

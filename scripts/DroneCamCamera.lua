@@ -192,6 +192,8 @@ function DroneCamCamera:resetTracking()
     self.lastVehicleX, self.lastVehicleY, self.lastVehicleZ = nil, nil, nil
     self.cropFloor = 0
     self.lastRotY = nil
+    self.fieldTimer = nil
+    self.fieldReach = nil
     -- The flight starts from the vehicle's own camera, which is usually inside
     -- the cab. The hard floors that keep the camera out of the vehicle and the
     -- crop only take hold once it has flown clear, or they would yank it out.
@@ -438,24 +440,26 @@ function DroneCamCamera:getModeTransform(vehicle, mode)
             yaw = math.atan2(-headingX, -headingZ)
         end
 
-        return vx, vy + settings.topDownHeight, vz,
+        return vx, vy + self:capHeight(settings.topDownHeight), vz,
                vx, vy, vz,
                yaw, -math.pi * 0.5
     end
 
     if mode == DroneCamSettings.MODE_ORBIT then
-        local offsetX = math.sin(self.orbitAngle) * settings.orbitRadius
-        local offsetZ = math.cos(self.orbitAngle) * settings.orbitRadius
+        local radius = self:capReach(settings.orbitRadius)
+        local offsetX = math.sin(self.orbitAngle) * radius
+        local offsetZ = math.cos(self.orbitAngle) * radius
 
-        return vx + offsetX, vy + settings.orbitHeight, vz + offsetZ,
+        return vx + offsetX, vy + self:capHeight(settings.orbitHeight), vz + offsetZ,
                vx, vy + DroneCamCamera.LOOK_HEIGHT_OFFSET, vz,
                nil, nil
     end
 
     -- Chase: behind and above, aiming slightly ahead of the vehicle.
-    return vx - headingX * settings.chaseDistance,
-           vy + settings.chaseHeight,
-           vz - headingZ * settings.chaseDistance,
+    local chaseDistance = self:capReach(settings.chaseDistance)
+    return vx - headingX * chaseDistance,
+           vy + self:capHeight(settings.chaseHeight),
+           vz - headingZ * chaseDistance,
            vx + headingX * settings.chaseLookAhead,
            vy + DroneCamCamera.LOOK_HEIGHT_OFFSET,
            vz + headingZ * settings.chaseLookAhead,
@@ -522,6 +526,45 @@ function DroneCamCamera:getIsShotStillUsable(shot)
     end
 
     return true
+end
+
+---Looks up the field being worked every FIELD_CHECK_INTERVAL seconds, tells
+---the director its size class, and moves the reach limit towards the one
+---for this field.
+function DroneCamCamera:updateField(dtSeconds, vehicle)
+    self.fieldTimer = (self.fieldTimer or math.huge) + dtSeconds
+    if self.fieldTimer >= DroneCamCamera.FIELD_CHECK_INTERVAL then
+        self.fieldTimer = 0
+        local x, _, z = getWorldTranslation(vehicle.rootNode)
+        self.fieldInfo = DroneCamField.getFieldInfo(x, z)
+        self.fieldClass = DroneCamField.getSizeClass(self.fieldInfo, self.settings)
+        self.director.fieldClass = self.fieldClass
+    end
+
+    local target = DroneCamCamera.FIELD_NO_LIMIT
+    if self.fieldInfo ~= nil then
+        target = math.max(self.fieldInfo.length * DroneCamCamera.FIELD_REACH_FACTOR, DroneCamCamera.FIELD_MIN_REACH)
+    end
+
+    if self.fieldReach == nil then
+        self.fieldReach = target
+    else
+        local step = DroneCamCamera.FIELD_REACH_RATE * dtSeconds
+        self.fieldReach = self.fieldReach + math.min(math.max(target - self.fieldReach, -step), step)
+    end
+end
+
+---@return number @The distance, no further than the field allows
+function DroneCamCamera:capReach(distance)
+    return math.min(distance, self.fieldReach or distance)
+end
+
+---@return number @The height, no higher than the field allows
+function DroneCamCamera:capHeight(height)
+    if self.fieldReach == nil then
+        return height
+    end
+    return math.min(height, math.max(self.fieldReach * DroneCamCamera.FIELD_HEIGHT_FACTOR, DroneCamCamera.FIELD_MIN_HEIGHT))
 end
 
 ---@return number @How far through the shot on screen we are, 0..1
@@ -622,6 +665,21 @@ DroneCamCamera.OVERHEAD_RADIUS = 1
 ---How far above the vehicle's roof a close-up blend arcs at the peak of a
 ---quarter turn or more round it.
 DroneCamCamera.ARC_CLEARANCE = 2
+
+---Field awareness: the field is looked up this often, and wide shots keep
+---within about its longest dimension (never less than FIELD_MIN_REACH, so
+---the usual chase and orbit framing is untouched) and within FIELD_HEIGHT_
+---FACTOR of that in height. The limit follows a change of field at no more
+---than FIELD_REACH_RATE m/s, so crossing into a bigger or smaller field
+---eases the shot out or in rather than jumping.
+DroneCamCamera.FIELD_CHECK_INTERVAL = 1
+DroneCamCamera.FIELD_REACH_FACTOR = 1
+DroneCamCamera.FIELD_MIN_REACH = 40
+DroneCamCamera.FIELD_HEIGHT_FACTOR = 0.6
+DroneCamCamera.FIELD_MIN_HEIGHT = 25
+DroneCamCamera.FIELD_REACH_RATE = 40
+---Stands for "no limit" (no field detected) while still easing towards it.
+DroneCamCamera.FIELD_NO_LIMIT = 2000
 
 ---Average speed limit for a glide between shots, in metres per second, and the
 ---longest a glide may take however far it has to go.
@@ -1121,6 +1179,7 @@ function DroneCamCamera:update(dt, vehicle)
     else
         self.blendTime = math.min(self.blendTime + dtSeconds, math.max(settings.blendTime, 0.0001))
 
+        self:updateField(dtSeconds, vehicle)
         self:updateShot(dtSeconds, vehicle, targetHeading)
         DroneCamCreator.updateDriveOver(self, dtSeconds, vehicle)
 

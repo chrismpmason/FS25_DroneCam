@@ -60,6 +60,131 @@ function DroneCamField.getEdgeDistance(x, z, dirX, dirZ, maxDistance)
     return nil
 end
 
+---Field size classes, see DroneCamField.getSizeClass.
+DroneCamField.SIZE_SMALL = "small"
+DroneCamField.SIZE_MEDIUM = "medium"
+DroneCamField.SIZE_LARGE = "large"
+
+---Outline of a game field as world coordinates, read once and kept: field
+---outlines come from the map and do not move.
+local outlineCache = setmetatable({}, { __mode = "k" })
+
+local function getOutline(field)
+    local outline = outlineCache[field]
+    if outline ~= nil then
+        return outline
+    end
+
+    local points = field.getPolygonPoints ~= nil and field:getPolygonPoints() or field.polygonPoints
+    if points == nil or #points < 3 then
+        return nil
+    end
+
+    outline = {}
+    for i = 1, #points do
+        local x, _, z = getWorldTranslation(points[i])
+        outline[i] = { x, z }
+    end
+    outlineCache[field] = outline
+    return outline
+end
+
+---@return boolean @True if the point is inside the outline (even-odd rule)
+local function getIsInside(outline, x, z)
+    local inside = false
+    local j = #outline
+    for i = 1, #outline do
+        local xi, zi = outline[i][1], outline[i][2]
+        local xj, zj = outline[j][1], outline[j][2]
+        if (zi > z) ~= (zj > z) and x < (xj - xi) * (z - zi) / (zj - zi) + xi then
+            inside = not inside
+        end
+        j = i
+    end
+    return inside
+end
+
+---The game field the point lies in, from the game's own field data.
+---@return table|nil
+function DroneCamField.getGameField(x, z)
+    local manager = g_fieldManager
+    if manager == nil or manager.fields == nil then
+        return nil
+    end
+
+    -- Quick route: the farmland at the point, and the field on it.
+    if g_farmlandManager ~= nil and g_farmlandManager.getFarmlandAtWorldPosition ~= nil
+        and manager.farmlandIdFieldMapping ~= nil then
+        local farmland = g_farmlandManager:getFarmlandAtWorldPosition(x, z)
+        local field = farmland ~= nil and manager.farmlandIdFieldMapping[farmland.id] or nil
+        local outline = field ~= nil and getOutline(field) or nil
+        if outline ~= nil and getIsInside(outline, x, z) then
+            return field
+        end
+    end
+
+    for _, field in pairs(manager.fields) do
+        local outline = getOutline(field)
+        if outline ~= nil and getIsInside(outline, x, z) then
+            return field
+        end
+    end
+
+    return nil
+end
+
+---Size and shape of the game field the point lies in.
+---@return table|nil @{field, areaHa, length (longest straight line across), centreX, centreZ}
+function DroneCamField.getFieldInfo(x, z)
+    local field = DroneCamField.getGameField(x, z)
+    if field == nil then
+        return nil
+    end
+
+    local outline = getOutline(field)
+    local length = 0
+    for i = 1, #outline do
+        for j = i + 1, #outline do
+            local dx, dz = outline[i][1] - outline[j][1], outline[i][2] - outline[j][2]
+            length = math.max(length, math.sqrt(dx * dx + dz * dz))
+        end
+    end
+
+    local centreX, centreZ
+    if field.getCenterOfFieldWorldPosition ~= nil then
+        centreX, centreZ = field:getCenterOfFieldWorldPosition()
+    end
+    if centreX == nil then
+        centreX, centreZ = field.posX, field.posZ
+    end
+    if centreX == nil then
+        local sumX, sumZ = 0, 0
+        for i = 1, #outline do
+            sumX, sumZ = sumX + outline[i][1], sumZ + outline[i][2]
+        end
+        centreX, centreZ = sumX / #outline, sumZ / #outline
+    end
+
+    return { field = field, areaHa = field.areaHa or 0, length = length, centreX = centreX, centreZ = centreZ }
+end
+
+---@param settings DroneCamSettings @fieldSmallHa and fieldLargeHa set the limits
+---@return string @SIZE_SMALL, SIZE_MEDIUM or SIZE_LARGE; medium when there is no field
+function DroneCamField.getSizeClass(info, settings)
+    if info == nil then
+        return DroneCamField.SIZE_MEDIUM
+    end
+
+    local small = settings.fieldSmallHa
+    local large = math.max(settings.fieldLargeHa, small)
+    if info.areaHa < small then
+        return DroneCamField.SIZE_SMALL
+    elseif info.areaHa > large then
+        return DroneCamField.SIZE_LARGE
+    end
+    return DroneCamField.SIZE_MEDIUM
+end
+
 ---Rough centre and size of the field around a point, from its edges in
 ---several directions.
 ---@return table|nil @{x, z, radius}, nil if the point is not on a field
