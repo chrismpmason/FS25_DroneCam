@@ -149,6 +149,12 @@ function DroneCam:draw()
         end
     end
 
+    -- Drive-over mode always says what it is doing, and why it is waiting.
+    if self.settings.mode == DroneCamSettings.MODE_DRIVE_OVER and self.camera ~= nil
+        and self.state ~= DroneCam.STATE_OFF and self.camera.modeStatus ~= nil then
+        lines[#lines + 1] = "Drive-over mode: " .. self.camera.modeStatus
+    end
+
     if self.message ~= nil then
         if (self.clock or 0) < self.message.untilTime then
             lines[#lines + 1] = self.message.text
@@ -197,6 +203,11 @@ function DroneCam:ensureCamera()
     end
 
     self.camera = DroneCamCamera.new(self.settings)
+    -- Drive-over mode reports what it is doing: into log.txt each time it
+    -- changes (the current state is also drawn on screen, see draw).
+    self.camera.onModeStatus = function(status)
+        DroneCam.log("Drive-over mode: " .. status)
+    end
 
     return true
 end

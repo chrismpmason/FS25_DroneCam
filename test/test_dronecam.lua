@@ -618,13 +618,17 @@ tick(12, false)
 DroneCam.settings.mode = CHASE
 local AUTO_RANDOM = DroneCamSettings.MODE_AUTO_RANDOM
 local cycled = {}
-for i = 1, 5 do
+for i = 1, 6 do
     DroneCam:onCycleMode()
     cycled[i] = DroneCam.settings.mode
 end
-check("Ctrl+C cycles chase -> top-down -> orbit -> auto story -> auto random -> chase",
+check("Ctrl+C cycles chase -> top-down -> orbit -> auto story -> auto random -> drive-over -> chase",
       cycled[1] == TOPDOWN and cycled[2] == ORBIT and cycled[3] == AUTO and cycled[4] == AUTO_RANDOM
-      and cycled[5] == CHASE, table.concat(cycled, ","))
+      and cycled[5] == DroneCamSettings.MODE_DRIVE_OVER and cycled[6] == CHASE, table.concat(cycled, ","))
+DroneCam.settings.mode = AUTO_RANDOM
+DroneCam:onCycleMode()
+check("drive-over mode is announced by name", NOTIFICATIONS[#NOTIFICATIONS] == "droneCam_mode: droneCam_mode_driveOver",
+      NOTIFICATIONS[#NOTIFICATIONS])
 DroneCam.settings.mode = ORBIT
 DroneCam:onCycleMode()
 check("auto director (story) is announced by name", NOTIFICATIONS[#NOTIFICATIONS] == "droneCam_mode: droneCam_mode_auto",
@@ -2282,6 +2286,118 @@ tick(2, false, 0, function() tookOff = tookOff or camera.shot == DRIVE_OVER end)
 check("Ctrl+G takes off and starts the drive-over", tookOff and droneIsActive())
 tick(45, false)
 check("and lands again when it is over", not droneIsActive() and not DroneCam.isForced)
+
+print("\n-- drive-over mode --")
+local WHEEL_PASS, LOW_CHASE = DroneCamSettings.SHOT_WHEEL_PASS, DroneCamSettings.SHOT_LOW_CHASE
+local MODE_DO = DroneCamSettings.MODE_DRIVE_OVER
+LOGGED = {}
+local realPrint2 = print
+print = function(text, ...)
+    if type(text) == "string" and text:sub(1, 10) == "[DroneCam]" then LOGGED[#LOGGED + 1] = text end
+    return realPrint2(text, ...)
+end
+local function countLogged(text)
+    local n = 0
+    for _, line in ipairs(LOGGED) do if says(line, text) then n = n + 1 end end
+    return n
+end
+local function screen()
+    RENDERED = {}
+    DroneCam:draw()
+    return table.concat(RENDERED, "\n")
+end
+
+---Drives in drive-over mode, recording the passes and every frame's safety.
+local function driveMode(seconds, headingRate, record)
+    record = record or { passes = {}, phases = {}, closest = math.huge, lowestWheelPass = math.huge,
+                         turningShots = {}, maxStep = 0, maxTurn = 0 }
+    local px, py, pz = getWorldTranslation(cn)
+    local prx, pry = nodes[cn].rx, nodes[cn].ry
+    local lastShot = camera.shot
+    tick(seconds, true, headingRate, function()
+        local x, y, z = getWorldTranslation(cn)
+        local rx, ry = nodes[cn].rx, nodes[cn].ry
+        record.maxStep = math.max(record.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
+        record.maxTurn = math.max(record.maxTurn, countTurn(math.max(math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))))
+        px, py, pz, prx, pry = x, y, z, rx, ry
+        if camera.shot ~= lastShot then
+            if DroneCamCreator.getIsGroundPass(camera.shot) then record.passes[#record.passes + 1] = camera.shot end
+            lastShot = camera.shot
+        end
+        for _, b in ipairs(VEHICLE_BODIES) do record.closest = math.min(record.closest, boxDistance(x, y, z, b)) end
+        local p = camera.plan
+        -- While the vehicle goes by (on the approach the camera may still be
+        -- settling from the shot before).
+        if camera.shot == WHEEL_PASS and p ~= nil and p.phase == "pass" and camera.fromPose == nil then
+            record.lowestWheelPass = math.min(record.lowestWheelPass, y - TERRAIN_HEIGHT)
+            record.wheelPassHighest = math.max(record.wheelPassHighest or 0, y - TERRAIN_HEIGHT)
+            -- Outside every footprint the whole way past.
+            local rigNow = DroneCamRig.measure(vehicle, heading)
+            if y < DroneCamRig.getVehicleFloor(rigNow, x, z, false) - 1e-6 then record.insideRig = true end
+        end
+        if camera.modeIsTurning then record.turningShots[camera.shot] = true end
+    end)
+    return record
+end
+
+-- A tractor on its own: drive-overs.
+startOn(SOLO_TRACTOR)
+DroneCam.settings.mode = MODE_DO
+local soloMode = driveMode(70, 0)
+check("sets up a drive-over on the straight", soloMode.passes[1] == DRIVE_OVER, tostring(soloMode.passes[1]))
+check("and another after it on a long run", #soloMode.passes >= 2, tostring(#soloMode.passes))
+check("holds the low chase in between", camera.shot == LOW_CHASE or DroneCamCreator.getIsGroundPass(camera.shot))
+check("never touches the tractor", soloMode.closest >= 0.2, ("%.2fm"):format(soloMode.closest))
+check("smooth apart from the swing", soloMode.maxStep < MAX_STEP and soloMode.maxTurn < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(soloMode.maxStep, soloMode.maxTurn))
+check("logs each pass", countLogged("[DroneCam] Drive-over mode: drive-over set up") >= 2
+      and countLogged("[DroneCam] Drive-over mode: drive-over finished") >= 1)
+
+-- A headland turn: low chase through it, the next drive-over once straight.
+local turnRecord = driveMode(6, math.rad(30))
+local onlyChase = true
+for shot in pairs(turnRecord.turningShots) do
+    if shot ~= LOW_CHASE and not DroneCamCreator.getIsGroundPass(shot) then onlyChase = false end
+end
+check("low chase through the turn", onlyChase and camera.shot == LOW_CHASE, tostring(camera.shot))
+check("and says it is waiting for the turn", says(screen(), "Drive-over mode: waiting - turning"), screen())
+local afterTurn = driveMode(8, 0)
+check("next drive-over set up once straight again", afterTurn.passes[1] == DRIVE_OVER, tostring(afterTurn.passes[1]))
+
+-- With a cultivator working the ground: a wheel pass instead.
+startOn(MOUNTED)
+DroneCam.settings.mode = MODE_DO
+local cult = driveMode(45, 0)
+check("a ground-working implement gets a wheel pass instead", cult.passes[1] == WHEEL_PASS, tostring(cult.passes[1]))
+check("low on the ground as it passes", cult.lowestWheelPass < 0.45 and (cult.wheelPassHighest or 99) < 0.5,
+      ("%.2f-%.2fm"):format(cult.lowestWheelPass, cult.wheelPassHighest or -1))
+check("never inside the tractor or the implement", not cult.insideRig and cult.closest >= 0.2, ("%.2fm"):format(cult.closest))
+check("wheel pass runs through to the chase", countLogged("[DroneCam] Drive-over mode: wheel pass finished") >= 1)
+
+-- Not possible: says why, on screen and in the log, once, and stays on the chase.
+startOn(SOLO_TRACTOR)
+DroneCam.settings.mode = MODE_DO
+CROP_AT = function() return 1, 5 end
+local before = countLogged("waiting - standing crop")
+local cropMode = driveMode(20, 0)
+check("stays on the low chase when it can't", camera.shot == LOW_CHASE and #cropMode.passes == 0)
+check("shows why on screen", says(screen(), "Drive-over mode: waiting - standing crop 3.2m high"), screen())
+check("logs why, once rather than every second", countLogged("waiting - standing crop") - before == 1,
+      tostring(countLogged("waiting - standing crop") - before))
+CROP_AT = function() return 0, 0 end
+local cleared = driveMode(6, 0)
+check("goes as soon as it can", cleared.passes[1] == DRIVE_OVER)
+
+-- No room before the row end: waits on the chase, says so.
+startOn(SOLO_TRACTOR)
+DroneCam.settings.mode = MODE_DO
+FIELD = { -100, 100, -300, 40 }
+driveMode(6, 0)
+check("row end too close: waits and says so", camera.shot == LOW_CHASE and says(screen(), "waiting - row end too close"))
+FIELD = nil
+
+print = realPrint2
+DroneCam.settings.mode = CHASE
 
 print("\n-- drive-over in the story: a hero shot about one loop in three --")
 -- Wichmann-Hill: Park-Miller's consecutive draws are too correlated for a

@@ -196,6 +196,12 @@ function DroneCamCamera:resetTracking()
     self.fieldReach = nil
     self.stationaryTime = 0
     self.isStationary = false
+    self.modeLastHeading = nil
+    self.modeYawRate = 0
+    self.modeStraightTime = 0
+    self.modeIsTurning = false
+    self.modePause = nil
+    self.modeRetry = 0
     -- The flight starts from the vehicle's own camera, which is usually inside
     -- the cab. The hard floors that keep the camera out of the vehicle and the
     -- crop only take hold once it has flown clear, or they would yank it out.
@@ -430,6 +436,22 @@ function DroneCamCamera:getModeTransform(vehicle, mode)
 
     if DroneCamCreator.getIsCreatorShot(mode) then
         return DroneCamCreator.getTransform(self, vehicle, mode)
+    end
+
+    if mode == DroneCamSettings.SHOT_LOW_CHASE then
+        -- Behind whatever is towed, low, on the vehicle's own heading.
+        local rig = self:getRig(vehicle)
+        local rear, scale = -2.5, 1
+        if rig ~= nil then
+            rear, scale = rig.rear, rig.scale
+        end
+        local px, py, pz = getWorldTranslation(vehicle.rootNode)
+        local fwdX, fwdZ = math.sin(self.heading), math.cos(self.heading)
+        local behind = rear - self:capReach(DroneCamCamera.LOW_CHASE_BEHIND + DroneCamCamera.LOW_CHASE_BEHIND_PER_SCALE * scale)
+        local ahead = DroneCamCamera.LOW_CHASE_LOOK_AHEAD
+        return px + fwdX * behind, py + DroneCamCamera.LOW_CHASE_HEIGHT * math.max(scale, 1), pz + fwdZ * behind,
+               px + fwdX * ahead, py + DroneCamCamera.LOOK_HEIGHT_OFFSET, pz + fwdZ * ahead,
+               nil, nil
     end
 
     local settings = self.settings
@@ -711,6 +733,9 @@ function DroneCamCamera:getShotTracking(shot)
     if DroneCamCreator.getIsCreatorShot(shot) then
         return DroneCamCreator.getTracking(self, shot)
     end
+    if shot == DroneCamSettings.SHOT_LOW_CHASE then
+        return 0, DroneCamCamera.LOW_CHASE_CLEARANCE
+    end
     return 0, self.settings.minClearance
 end
 
@@ -934,7 +959,9 @@ DroneCamCamera.SHOT_NAMES = {
     [DroneCamSettings.SHOT_FLY_OVER] = "fly-over",
     [DroneCamSettings.SHOT_RISE_UP] = "rise-up",
     [DroneCamSettings.SHOT_SLIDE] = "slide",
-    [DroneCamSettings.SHOT_DRIVE_OVER] = "drive-over"
+    [DroneCamSettings.SHOT_DRIVE_OVER] = "drive-over",
+    [DroneCamSettings.SHOT_WHEEL_PASS] = "wheel pass",
+    [DroneCamSettings.SHOT_LOW_CHASE] = "low chase"
 }
 
 ---The debug overlay's drive-over check is repeated this often, not every
@@ -1057,10 +1084,105 @@ function DroneCamCamera:getWantedShot(dtSeconds, heading)
     return wanted
 end
 
+---Drive-over mode: tries to set up a pass this often while waiting, and holds
+---the low chase at least this long after one before setting up the next.
+DroneCamCamera.MODE_RETRY_TIME = 1
+DroneCamCamera.MODE_PAUSE_TIME = 5
+
+---Low chase, held between passes in drive-over mode: this far behind the
+---back of the combination (plus a little per unit of vehicle scale), this
+---high, and never lower than LOW_CHASE_CLEARANCE over the ground.
+DroneCamCamera.LOW_CHASE_BEHIND = 10
+DroneCamCamera.LOW_CHASE_BEHIND_PER_SCALE = 4
+DroneCamCamera.LOW_CHASE_HEIGHT = 4
+DroneCamCamera.LOW_CHASE_LOOK_AHEAD = 6
+DroneCamCamera.LOW_CHASE_CLEARANCE = 2.5
+
+---Tracks whether the vehicle is turning, the same way the director does, for
+---drive-over mode (which runs without the director).
+function DroneCamCamera:updateModeTurning(dtSeconds, heading)
+    if heading ~= nil then
+        if self.modeLastHeading ~= nil and dtSeconds > 0 then
+            local rate = normaliseAngleDiff(heading - self.modeLastHeading) / dtSeconds
+            self.modeYawRate = (self.modeYawRate or 0)
+                + (rate - (self.modeYawRate or 0)) * smoothingAlpha(dtSeconds, DroneCamDirector.YAW_RATE_STIFFNESS)
+        end
+        self.modeLastHeading = heading
+    end
+
+    self.modeIsTurning = math.abs(self.modeYawRate or 0) > DroneCamDirector.TURN_RATE
+    if self.modeIsTurning then
+        self.modeStraightTime = 0
+    else
+        self.modeStraightTime = (self.modeStraightTime or 0) + dtSeconds
+    end
+end
+
+---Records what drive-over mode is doing, and passes it on (to the screen and
+---log.txt) whenever it changes, so a reason that stays the same is reported once.
+function DroneCamCamera:reportMode(status)
+    self.modeStatus = status
+    if status ~= self.modeLastReported then
+        self.modeLastReported = status
+        if self.onModeStatus ~= nil then
+            self.onModeStatus(status)
+        end
+    end
+end
+
+---Drive-over mode: a drive-over (or a wheel pass, with an implement working
+---the ground) on every straight run, a low chase in between and through the
+---turns, and the reason on screen and in the log when one cannot be done.
+---@return integer
+function DroneCamCamera:getDriveOverModeShot(dtSeconds)
+    local plan = self.plan
+    if DroneCamCreator.getIsGroundPass(self.shot) and plan ~= nil and plan.shot == self.shot then
+        if not plan.isDone and not plan.isLost then
+            self.modePause = 0
+            return self.shot
+        end
+        if not plan.isReported then
+            plan.isReported = true
+            local name = DroneCamCamera.SHOT_NAMES[self.shot]
+            self:reportMode(plan.isLost and (name .. " dropped: " .. tostring(plan.lostReason)) or (name .. " finished"))
+        end
+    end
+
+    self.modePause = (self.modePause or math.huge) + dtSeconds
+    self.modeRetry = (self.modeRetry or 0) - dtSeconds
+
+    -- Through a turn there is nothing to try; just say so.
+    if self.modeIsTurning then
+        self:reportMode("waiting - turning")
+        return DroneCamSettings.SHOT_LOW_CHASE
+    end
+
+    if self.vehicle ~= nil and self.modePause >= DroneCamCamera.MODE_PAUSE_TIME and self.modeRetry <= 0 then
+        self.modeRetry = DroneCamCamera.MODE_RETRY_TIME
+        local shot, newPlan, reason = DroneCamCreator.planGroundPass(self, self.vehicle, "mode")
+        if newPlan ~= nil then
+            self.planCache[shot] = { frameId = self.frameId, plan = newPlan }
+            self:reportMode(DroneCamCamera.SHOT_NAMES[shot] .. " set up")
+            return shot
+        end
+        self:reportMode("waiting - " .. tostring(reason))
+    end
+
+    return DroneCamSettings.SHOT_LOW_CHASE
+end
+
 ---@param heading number|nil @Raw vehicle heading in radians
 ---@return integer @Angle the mode or the director wants on screen
 function DroneCamCamera:getDirectorShot(dtSeconds, heading)
     local mode = self.settings.mode
+
+    if mode == DroneCamSettings.MODE_DRIVE_OVER then
+        if self.director.isRunning then
+            self.director:reset()
+        end
+        return self:getDriveOverModeShot(dtSeconds)
+    end
+    self.modeStatus, self.modeLastReported, self.modePause = nil, nil, nil
 
     if not DroneCamSettings.getIsAutoMode(mode) then
         if self.director.isRunning then
@@ -1259,13 +1381,14 @@ end
 ---The vehicle floor used here is the eased one, so a camera drifting towards
 ---the vehicle is lifted progressively over the last metre or so, never
 ---snapped up in a single frame.
----@param isDriveOverLow boolean @On the ground for a drive-over: lower ground
----    floor, no crop floor (the shot checked the crop), and the vehicle it goes
----    under is left out of the vehicle floor (anything towed still counts)
-function DroneCamCamera:applyHardFloors(vehicle, isDriveOverLow)
+---@param isGroundLow boolean @On the ground for a drive-over or wheel pass: lower
+---    ground floor, and no crop floor (the shot checked the crop)
+---@param isUnderVehicle boolean @The drive-over: the vehicle it goes under is left
+---    out of the vehicle floor (anything towed still counts)
+function DroneCamCamera:applyHardFloors(vehicle, isGroundLow, isUnderVehicle)
     local ground = getTerrainHeightAt(self.posX, self.posZ)
     local groundClearance = DroneCamCamera.HARD_GROUND_CLEARANCE
-    if isDriveOverLow then
+    if isGroundLow then
         groundClearance = DroneCamCreator.DRIVE_OVER_HEIGHT - 0.05
     end
     self.posY = math.max(self.posY, ground + groundClearance)
@@ -1279,7 +1402,7 @@ function DroneCamCamera:applyHardFloors(vehicle, isDriveOverLow)
         return
     end
 
-    if not isDriveOverLow and self.posY - ground < DroneCamCamera.CROP_CHECK_HEIGHT then
+    if not isGroundLow and self.posY - ground < DroneCamCamera.CROP_CHECK_HEIGHT then
         local crop = DroneCamCamera.getCropHeightAt(self.posX, self.posZ)
         if crop > 0 then
             self.posY = math.max(self.posY, ground + crop + DroneCamCamera.CROP_HARD_MARGIN)
@@ -1287,7 +1410,7 @@ function DroneCamCamera:applyHardFloors(vehicle, isDriveOverLow)
     end
 
     if rig ~= nil then
-        self.posY = math.max(self.posY, DroneCamRig.getVehicleFloor(rig, self.posX, self.posZ, true, isDriveOverLow))
+        self.posY = math.max(self.posY, DroneCamRig.getVehicleFloor(rig, self.posX, self.posZ, true, isUnderVehicle))
     end
 end
 
@@ -1353,6 +1476,7 @@ function DroneCamCamera:update(dt, vehicle)
     local overrideWeight = 0
     local tracking, clearance = 0, settings.minClearance
     local isDriveOverLow = false
+    local isGroundLow = false
 
     if isBlendingOut then
         self.blendTime = self.blendTime + dtSeconds
@@ -1371,14 +1495,17 @@ function DroneCamCamera:update(dt, vehicle)
         self.blendTime = math.min(self.blendTime + dtSeconds, math.max(settings.blendTime, 0.0001))
 
         self:updateField(dtSeconds, vehicle)
+        self:updateModeTurning(dtSeconds, targetHeading)
         self:updateShot(dtSeconds, vehicle, targetHeading)
         DroneCamCreator.updateDriveOver(self, dtSeconds, vehicle)
+        DroneCamCreator.updateWheelPass(self, dtSeconds, vehicle)
         self:updateDebug(dtSeconds, vehicle)
 
         -- On the ground for a drive-over the camera is placed to the
         -- centimetre: no drift, no crop or vehicle floor for the vehicle it is
         -- meant to go under (towed kit still counts), a single terrain sample.
         isDriveOverLow = DroneCamCreator.getIsDriveOverLow(self)
+        isGroundLow = DroneCamCreator.getIsGroundPassLow(self)
 
         desiredPosX, desiredPosY, desiredPosZ,
         desiredLookX, desiredLookY, desiredLookZ,
@@ -1396,7 +1523,7 @@ function DroneCamCamera:update(dt, vehicle)
 
         -- Never below the terrain plus the clearance for this angle.
         local step = lerp(DroneCamCamera.TERRAIN_SAMPLE_STEP, DroneCamCamera.CLOSEUP_TERRAIN_SAMPLE_STEP, tracking)
-        if isDriveOverLow then
+        if isGroundLow then
             step = 0
         end
         local minY = getTerrainHeightAround(desiredPosX, desiredPosZ, step) + clearance
@@ -1404,7 +1531,7 @@ function DroneCamCamera:update(dt, vehicle)
             desiredPosY = minY
         end
 
-        if not isDriveOverLow then
+        if not isGroundLow then
             desiredPosY = self:applyCropFloor(dtSeconds, desiredPosX, desiredPosY, desiredPosZ)
         end
 
@@ -1456,7 +1583,7 @@ function DroneCamCamera:update(dt, vehicle)
 
     if not isBlendingOut then
         self:updateObstacleClearance(dtSeconds)
-        self:applyHardFloors(vehicle, isDriveOverLow)
+        self:applyHardFloors(vehicle, isGroundLow, isDriveOverLow)
         DroneCamCreator.updateSight(self.plan, dtSeconds, self.posX, self.posY, self.posZ, vehicle)
         self:setFov(desiredFov)
     elseif self.appliedFov ~= nil then

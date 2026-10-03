@@ -11,8 +11,11 @@ DroneCamSettings.MODE_ORBIT = 3
 ---DroneCamDirector), either following a story sequence or at random.
 DroneCamSettings.MODE_AUTO = 4
 DroneCamSettings.MODE_AUTO_RANDOM = 5
+---A drive-over (or a wheel pass, with an implement working the ground) on
+---every straight run, with a low chase in between.
+DroneCamSettings.MODE_DRIVE_OVER = 6
 DroneCamSettings.MODE_FIRST = 1
-DroneCamSettings.MODE_LAST = 5
+DroneCamSettings.MODE_LAST = 6
 
 ---@return boolean @True for either Auto director mode
 function DroneCamSettings.getIsAutoMode(mode)
@@ -44,13 +47,18 @@ DroneCamSettings.SHOT_SLIDE = 215
 
 -- The hero shot: on the ground in the vehicle's path, letting it drive over.
 DroneCamSettings.SHOT_DRIVE_OVER = 221
+-- On the ground just outside the vehicle's track, the vehicle rolling past.
+DroneCamSettings.SHOT_WHEEL_PASS = 222
+-- Lower and closer than the chase angle, held between passes in drive-over mode.
+DroneCamSettings.SHOT_LOW_CHASE = 223
 
 DroneCamSettings.MODE_L10N = {
     [DroneCamSettings.MODE_CHASE] = "droneCam_mode_chase",
     [DroneCamSettings.MODE_TOPDOWN] = "droneCam_mode_topDown",
     [DroneCamSettings.MODE_ORBIT] = "droneCam_mode_orbit",
     [DroneCamSettings.MODE_AUTO] = "droneCam_mode_auto",
-    [DroneCamSettings.MODE_AUTO_RANDOM] = "droneCam_mode_autoRandom"
+    [DroneCamSettings.MODE_AUTO_RANDOM] = "droneCam_mode_autoRandom",
+    [DroneCamSettings.MODE_DRIVE_OVER] = "droneCam_mode_driveOver"
 }
 
 DroneCamSettings.XML_ROOT = "droneCam"

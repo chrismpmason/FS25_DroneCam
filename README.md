@@ -102,11 +102,21 @@ All are rebindable in the game's control settings.
 | Default | Action |
 | --- | --- |
 | `Ctrl+D` | Toggle automatic mode |
-| `Ctrl+C` | Cycle Chase → Top-down → Orbit → Auto director (story) → Auto director (random) |
+| `Ctrl+C` | Cycle Chase → Top-down → Orbit → Auto director (story) → Auto director (random) → Drive-over |
 | `Ctrl+F` | Force the drone camera on, even when not working |
 | `Ctrl+H` | Hide the HUD while the drone is flying |
 | `Ctrl+G` | Drive-over now, if it can be done safely (says why not if it can't) |
 | `Ctrl+Shift+D` | Debug overlay: the shot on screen, the field, and why a drive-over can or can't be done |
+
+**Drive-over mode.** The last mode on Ctrl+C sets up a drive-over on every
+straight run — or, with an implement working the ground (which leaves no way up
+between tractor and implement), a **wheel pass**: the camera sits 0.4m up just
+outside the widest part of the combination and sweeps along it as it rolls past,
+then rises into the chase. In between, and through headland turns, it holds a
+low chase, and sets up the next pass once the vehicle has been straight for
+1.5s (and at least 5s after the last). If a pass can't be done the reason stays
+on screen ("Drive-over mode: waiting - …") and goes into `log.txt` as a
+`[DroneCam]` line each time it changes.
 
 **Hired workers, Courseplay and AutoDrive.** While one of their jobs is running
 on your vehicle, a drone that is up stays up, even while the vehicle waits or
