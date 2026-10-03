@@ -2187,24 +2187,49 @@ DroneCam:draw()
 check("and goes away again", #RENDERED == 0)
 
 print("\n-- Ctrl+G: drive-over on demand --")
+-- Catch "[DroneCam]" lines written to log.txt (the game logs print output).
+local LOGGED = {}
+local realPrint = print
+print = function(text, ...)
+    if type(text) == "string" and text:sub(1, 10) == "[DroneCam]" then LOGGED[#LOGGED + 1] = text end
+    return realPrint(text, ...)
+end
+local function onScreen()
+    RENDERED = {}
+    DroneCam:draw()
+    return table.concat(RENDERED, "\n")
+end
+local function logged(text)
+    for _, line in ipairs(LOGGED) do
+        if says(line, text) then return true end
+    end
+    return false
+end
+
 startOn(SOLO_TRACTOR)
 DroneCam.settings.mode = CHASE
+DroneCam.settings.showDebug = false
 tick(3, true)
-local notes = #NOTIFICATIONS
 DroneCam:onForceDriveOver()
 tick(1, true)
 check("Ctrl+G starts a drive-over in chase mode", camera.shot == DRIVE_OVER and camera.forcedShot == DRIVE_OVER)
-check("and says so", NOTIFICATIONS[#NOTIFICATIONS] == "droneCam_driveOver")
+check("and says so on screen", says(onScreen(), "droneCam_driveOver"), onScreen())
+check("and in log.txt", logged("[DroneCam] Ctrl+G: drive-over asked for") and logged("[DroneCam] Ctrl+G: drive-over started"))
+tick(6, true)
+check("the message is still up 7 seconds later", says(onScreen(), "droneCam_driveOver"))
+tick(1.5, true)
+check("and gone after 8", not says(onScreen(), "droneCam_driveOver"), onScreen())
 local forcedPhases = {}
-tick(40, true, 0, function()
+tick(32, true, 0, function()
     local p = camera.plan
     if camera.shot == DRIVE_OVER and p ~= nil and forcedPhases[#forcedPhases] ~= p.phase then
         forcedPhases[#forcedPhases + 1] = p.phase
     end
 end)
-check("runs the whole drive-over", table.concat(forcedPhases, ">") == "approach>under>swing>rise>join>tail",
-      table.concat(forcedPhases, ">"))
+check("runs the whole drive-over", table.concat(forcedPhases, ">") == "under>swing>rise>join>tail"
+      or table.concat(forcedPhases, ">") == "approach>under>swing>rise>join>tail", table.concat(forcedPhases, ">"))
 check("then goes back to chase", camera.shot == CHASE and camera.forcedShot == nil)
+check("and logs that it finished", logged("[DroneCam] Ctrl+G: drive-over finished"))
 
 startOn(MOUNTED)
 DroneCam.settings.mode = CHASE
@@ -2212,8 +2237,39 @@ tick(3, true)
 DroneCam:onForceDriveOver()
 tick(1, true)
 check("Ctrl+G with a mounted implement: no drive-over", camera.shot ~= DRIVE_OVER)
-check("and says why", says(NOTIFICATIONS[#NOTIFICATIONS] or "", "droneCam_driveOverNot: implement too close behind"),
-      NOTIFICATIONS[#NOTIFICATIONS])
+check("and says why on screen", says(onScreen(), "droneCam_driveOverNot: implement too close behind"), onScreen())
+check("and writes the reason to log.txt", logged("[DroneCam] Ctrl+G: no drive-over - implement too close behind"))
+tick(7, true)
+check("the reason is still readable 7 seconds later", says(onScreen(), "implement too close behind"))
+
+-- A started drive-over that is dropped says so, with the reason.
+startOn(SOLO_TRACTOR)
+DroneCam.settings.mode = CHASE
+tick(3, true)
+DroneCam:onForceDriveOver()
+tick(2, true)
+VEHICLE_SPEED = 0
+tick(5, false)
+check("a dropped Ctrl+G drive-over is logged with the reason", logged("[DroneCam] Ctrl+G: drive-over dropped - the vehicle stopped"))
+check("and shown on screen", says(onScreen(), "droneCam_driveOverDropped: the vehicle stopped"), onScreen())
+VEHICLE_SPEED = 3
+print = realPrint
+
+print("\n-- debug overlay stays up until switched off --")
+startOn(SOLO_TRACTOR)
+DroneCam.settings.showDebug = false
+DroneCam:onToggleDebug()
+tick(12, false)
+check("drone landed", not droneIsActive())
+check("overlay still up with the drone down", says(onScreen(), "DroneCam: drone not flying"), onScreen())
+vehicle.getIsEntered = function() return false end
+tick(1, false)
+check("and out of the vehicle", says(onScreen(), "DroneCam: drone not flying"))
+vehicle.getIsEntered = function() return true end
+tick(4, true)
+check("and back to the full overlay when flying", says(onScreen(), "DroneCam shot:"))
+DroneCam:onToggleDebug()
+check("until Ctrl+Shift+D again", onScreen() == "")
 
 -- Not working, drone landed: Ctrl+G takes off for it and lands afterwards.
 startOn(SOLO_TRACTOR)

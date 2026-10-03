@@ -207,6 +207,7 @@ end
 function DroneCamCamera:resetShot()
     self.shot = nil
     self.forcedShot = nil
+    self.forcedOnEnd = nil
     self.activeTime = 0
     self.shotSide = 1
     self.plan = nil
@@ -1007,8 +1008,9 @@ DroneCamCamera.FORCE_SETTLE_TIME = 0.5
 
 ---Asks for a drive-over as soon as one can be done safely (Ctrl+G).
 ---@param onResult function|nil @Called with (true) when it starts or (false, reason) when it cannot
-function DroneCamCamera:requestDriveOver(onResult)
-    self.driveOverRequest = { onResult = onResult }
+---@param onEnd function|nil @Called when a started one ends: with the reason if it was dropped, nil if it finished
+function DroneCamCamera:requestDriveOver(onResult, onEnd)
+    self.driveOverRequest = { onResult = onResult, onEnd = onEnd }
 end
 
 ---The shot that should be on screen: a drive-over asked for with the force
@@ -1026,6 +1028,7 @@ function DroneCamCamera:getWantedShot(dtSeconds, heading)
         self.lastForceResult = plan ~= nil and "started" or reason
         if plan ~= nil then
             self.forcedShot = driveOver
+            self.forcedOnEnd = request.onEnd
             self.planCache[driveOver] = { frameId = self.frameId, plan = plan }
         end
         if request.onResult ~= nil then
@@ -1039,6 +1042,13 @@ function DroneCamCamera:getWantedShot(dtSeconds, heading)
             and (plan == nil or plan.shot ~= self.forcedShot or plan.isDone or plan.isLost)
         if isOver then
             self.forcedShot = nil
+            local onEnd = self.forcedOnEnd
+            self.forcedOnEnd = nil
+            if onEnd ~= nil then
+                local dropped = plan ~= nil and plan.isLost and (plan.lostReason or "lost sight of the vehicle") or nil
+                self.lastForceResult = dropped ~= nil and ("dropped: " .. dropped) or "finished"
+                onEnd(dropped)
+            end
         else
             return self.forcedShot
         end

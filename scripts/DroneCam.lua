@@ -112,19 +112,55 @@ end
 function DroneCam:keyEvent(unicode, sym, modifier, isDown)
 end
 
----Debug overlay (Ctrl+Shift+D): the shot on screen and why the drive-over
----can or cannot be done, top left, while the drone is flying.
+---How long an on-screen message (the Ctrl+G result) stays up, in ms.
+DroneCam.MESSAGE_TIME = 8000
+
+---Puts a message top left for MESSAGE_TIME, long enough to read a reason.
+function DroneCam:showMessage(text)
+    self.message = { text = text, untilTime = (self.clock or 0) + DroneCam.MESSAGE_TIME }
+end
+
+---Writes a "[DroneCam]" line to log.txt.
+function DroneCam.log(text)
+    print("[DroneCam] " .. text)
+end
+
+---Top left: the debug overlay (Ctrl+Shift+D) for as long as it is switched
+---on, flying or not, and under it the last Ctrl+G message for 8 seconds.
 function DroneCam:draw()
-    if not self.settings.showDebug or self.camera == nil or self.state == DroneCam.STATE_OFF
-        or renderText == nil then
+    if renderText == nil then
         return
     end
 
-    local lines = self.camera:getDebugLines()
-    if self.trackedVehicle ~= nil and DroneCamWorkDetect.getIsAIJobActive(self.trackedVehicle) then
-        lines[#lines + 1] = self.isAIHoldDismissed and "Helper job running: drone stood down (Ctrl+F)"
-            or "Helper job running: drone stays up until it ends"
+    local lines = {}
+
+    if self.settings.showDebug then
+        if self.camera ~= nil and self.state ~= DroneCam.STATE_OFF then
+            lines = self.camera:getDebugLines()
+        else
+            lines[1] = "DroneCam: drone not flying"
+            if self.camera ~= nil and self.camera.lastForceResult ~= nil then
+                lines[2] = "Last Ctrl+G: " .. self.camera.lastForceResult
+            end
+        end
+        if self.trackedVehicle ~= nil and DroneCamWorkDetect.getIsAIJobActive(self.trackedVehicle) then
+            lines[#lines + 1] = self.isAIHoldDismissed and "Helper job running: drone stood down (Ctrl+F)"
+                or "Helper job running: drone stays up until it ends"
+        end
     end
+
+    if self.message ~= nil then
+        if (self.clock or 0) < self.message.untilTime then
+            lines[#lines + 1] = self.message.text
+        else
+            self.message = nil
+        end
+    end
+
+    if #lines == 0 then
+        return
+    end
+
     local size = 0.014
     local x, y = 0.01, 0.97
 
@@ -254,6 +290,9 @@ function DroneCam:update(dt)
     if g_dedicatedServer ~= nil or g_currentMission == nil then
         return
     end
+
+    -- Its own clock, for how long messages stay up.
+    self.clock = (self.clock or 0) + dt
 
     local vehicle = getControlledVehicle()
 
@@ -434,11 +473,24 @@ function DroneCam:onForceDriveOver()
         self.hasUserOverride = false
     end
 
+    DroneCam.log("Ctrl+G: drive-over asked for")
+
+    -- The result goes on screen for 8 seconds and into log.txt; so does the
+    -- end of a drive-over that started, with the reason if it was dropped.
     self.camera:requestDriveOver(function(isStarted, reason)
         if isStarted then
-            showNotification(getText("droneCam_driveOver"))
+            self:showMessage(getText("droneCam_driveOver"))
+            DroneCam.log("Ctrl+G: drive-over started")
         else
-            showNotification(("%s: %s"):format(getText("droneCam_driveOverNot"), tostring(reason)))
+            self:showMessage(("%s: %s"):format(getText("droneCam_driveOverNot"), tostring(reason)))
+            DroneCam.log("Ctrl+G: no drive-over - " .. tostring(reason))
+        end
+    end, function(droppedReason)
+        if droppedReason ~= nil then
+            self:showMessage(("%s: %s"):format(getText("droneCam_driveOverDropped"), droppedReason))
+            DroneCam.log("Ctrl+G: drive-over dropped - " .. droppedReason)
+        else
+            DroneCam.log("Ctrl+G: drive-over finished")
         end
     end)
 end

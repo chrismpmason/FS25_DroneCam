@@ -9,6 +9,7 @@
         <text name="input_DRONECAM_DEBUG" text="DroneCam: Debug overlay" />
         <text name="droneCam_driveOver" text="DroneCam: drive-over" />
         <text name="droneCam_driveOverNot" text="DroneCam: no drive-over" />
+        <text name="droneCam_driveOverDropped" text="DroneCam: drive-over dropped" />
         <text name="droneCam_debug" text="DroneCam debug" />
 
         <text name="droneCam_auto" text="DroneCam" />
