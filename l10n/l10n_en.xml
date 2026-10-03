@@ -14,6 +14,7 @@
         <text name="droneCam_mode_chase" text="Chase" />
         <text name="droneCam_mode_topDown" text="Top-down" />
         <text name="droneCam_mode_orbit" text="Orbit" />
+        <text name="droneCam_mode_auto" text="Auto director" />
 
         <text name="droneCam_on" text="on" />
         <text name="droneCam_off" text="off" />

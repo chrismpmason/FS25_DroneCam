@@ -4,9 +4,12 @@ A client-side Farming Simulator 25 mod that switches to a drone-style camera
 while the vehicle you are controlling is working a field, and hands back to the
 normal vehicle camera when work stops.
 
-Three modes — **Chase**, **Top-down** and **Orbit** — with framerate-independent
-smoothing, terrain clamping and an obstacle raycast that lifts the shot clear of
-trees and buildings. No events are sent and nothing is synchronised, so it is
+Three angles — **Chase**, **Top-down** and **Orbit** — plus an **Auto director**
+mode that cuts between them at random every 10–15 seconds, never repeating an
+angle and never changing during a headland turn. Every change of angle is a
+two-second blend that swings round the vehicle rather than a hard cut. All of it
+has framerate-independent smoothing, terrain clamping and an obstacle raycast
+that lifts the shot clear of trees and buildings. No events are sent and nothing is synchronised, so it is
 safe in multiplayer and does nothing on a dedicated server.
 
 ## Controls
@@ -16,7 +19,7 @@ All four are rebindable in the game's control settings.
 | Default | Action |
 | --- | --- |
 | `Ctrl+D` | Toggle automatic mode |
-| `Ctrl+C` | Cycle Chase → Top-down → Orbit |
+| `Ctrl+C` | Cycle Chase → Top-down → Orbit → Auto director |
 | `Ctrl+F` | Force the drone camera on, even when not working |
 | `Ctrl+H` | Hide the HUD while the drone is flying |
 
@@ -31,7 +34,8 @@ modDesc.xml                      descVersion, input bindings, l10n
 icon_DroneCam.dds                256x256 DXT1
 l10n/l10n_en.xml
 scripts/DroneCam.lua             manager: state machine and input
-scripts/DroneCamCamera.lua       camera node, smoothing, modes
+scripts/DroneCamCamera.lua       camera node, smoothing, angles and blends
+scripts/DroneCamDirector.lua     Auto director: shot timing, choice, turn hold
 scripts/DroneCamWorkDetect.lua   field-work detection and hysteresis
 scripts/DroneCamSettings.lua     defaults and XML persistence
 test/test_dronecam.lua           offline test suite
@@ -44,7 +48,8 @@ tools/make_icon.py               regenerates icon_DroneCam.dds
 
 `test/test_dronecam.lua` stubs the engine and game globals the mod touches, then
 drives it through a simulated work session. It covers engage/disengage timing,
-framing and aim, the terrain clamp, obstacle avoidance, all three modes, combine
+framing and aim, the terrain clamp, obstacle avoidance, all three angles, the
+Auto director (hold times, no repeats, headland hold, no hard cuts), combine
 and hired-helper detection, settings round-tripping, and every path that must
 return the player to their own camera.
 

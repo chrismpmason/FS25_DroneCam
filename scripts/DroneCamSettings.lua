@@ -7,13 +7,16 @@ DroneCamSettings = {}
 DroneCamSettings.MODE_CHASE = 1
 DroneCamSettings.MODE_TOPDOWN = 2
 DroneCamSettings.MODE_ORBIT = 3
+---Not an angle of its own: cuts between the three above (see DroneCamDirector).
+DroneCamSettings.MODE_AUTO = 4
 DroneCamSettings.MODE_FIRST = 1
-DroneCamSettings.MODE_LAST = 3
+DroneCamSettings.MODE_LAST = 4
 
 DroneCamSettings.MODE_L10N = {
     [DroneCamSettings.MODE_CHASE] = "droneCam_mode_chase",
     [DroneCamSettings.MODE_TOPDOWN] = "droneCam_mode_topDown",
-    [DroneCamSettings.MODE_ORBIT] = "droneCam_mode_orbit"
+    [DroneCamSettings.MODE_ORBIT] = "droneCam_mode_orbit",
+    [DroneCamSettings.MODE_AUTO] = "droneCam_mode_auto"
 }
 
 DroneCamSettings.XML_ROOT = "droneCam"
@@ -41,6 +44,9 @@ DroneCamSettings.SCHEMA = {
     { "lookStiffness",   "float", 3,     0.1, 20 },
     { "headingStiffness","float", 1,     0.1, 20 },
     { "blendTime",       "float", 1,     0,   5 },
+    { "shotBlendTime",   "float", 2,     0,   10 },
+    { "directorMinShot", "float", 10,    3,   120 },
+    { "directorMaxShot", "float", 15,    3,   120 },
     { "followAI",        "bool",  false },
     { "sway",            "bool",  true },
     { "swayAmplitude",   "float", 0.4,   0,   3 },

@@ -90,6 +90,8 @@ function DroneCamCamera.new(settings)
 
     self.appliedFov = settings.fov
 
+    self.director = DroneCamDirector.new(settings)
+
     self:resetState()
 
     return self
@@ -118,6 +120,20 @@ function DroneCamCamera:resetState()
     self.blendTime = 0
     self.returnNode = nil
     self.blendOutActive = false
+    self:resetShot()
+end
+
+---Forgets which angle is on screen, so the next frame takes up the wanted one
+---directly instead of blending to it.
+function DroneCamCamera:resetShot()
+    self.shot = nil
+    self.fromPose = nil
+    self.shotBlendElapsed = 0
+    self.blendBearingDiff = nil
+
+    if self.director ~= nil then
+        self.director:reset()
+    end
 end
 
 ---@return integer|nil
@@ -134,6 +150,7 @@ function DroneCamCamera:activate(fromNode, vehicle)
     self.blendTime = 0
     self.returnNode = nil
     self.blendOutActive = false
+    self:resetShot()
 
     local seeded = false
 
@@ -239,21 +256,22 @@ function DroneCamCamera:getSwayOffset()
     return swayX, swayY, swayZ
 end
 
----Computes where the camera wants to be and what it wants to look at, for the
----current mode.
+---Computes where the camera wants to be and what it wants to look at, for one
+---angle.
 ---@param vehicle table
+---@param mode integer @MODE_CHASE, MODE_TOPDOWN or MODE_ORBIT
 ---@return number, number, number @Desired camera position
 ---@return number, number, number @Desired look target
 ---@return number|nil @Explicit yaw override (used by the top-down mode)
 ---@return number|nil @Explicit pitch override
-function DroneCamCamera:getModeTransform(vehicle)
+function DroneCamCamera:getModeTransform(vehicle, mode)
     local settings = self.settings
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
 
     -- Smoothed heading, expressed as a forward vector.
     local headingX, headingZ = math.sin(self.heading), math.cos(self.heading)
 
-    if settings.mode == DroneCamSettings.MODE_TOPDOWN then
+    if mode == DroneCamSettings.MODE_TOPDOWN then
         local yaw = 0
         if not settings.topDownNorthUp then
             -- Screen-up follows the vehicle's heading.
@@ -265,7 +283,7 @@ function DroneCamCamera:getModeTransform(vehicle)
                yaw, -math.pi * 0.5
     end
 
-    if settings.mode == DroneCamSettings.MODE_ORBIT then
+    if mode == DroneCamSettings.MODE_ORBIT then
         local offsetX = math.sin(self.orbitAngle) * settings.orbitRadius
         local offsetZ = math.cos(self.orbitAngle) * settings.orbitRadius
 
@@ -282,6 +300,183 @@ function DroneCamCamera:getModeTransform(vehicle)
            vy + DroneCamCamera.LOOK_HEIGHT_OFFSET,
            vz + headingZ * settings.chaseLookAhead,
            nil, nil
+end
+
+---Radius below which a pose is treated as directly overhead and so has no
+---meaningful bearing of its own.
+DroneCamCamera.OVERHEAD_RADIUS = 1
+
+local function smoothstep(t)
+    return t * t * (3 - 2 * t)
+end
+
+---Describes one angle relative to the vehicle: bearing, radius and height of the
+---camera around it, and the look target as an offset from it. Blending in these
+---terms swings the camera round the vehicle at a distance, where blending world
+---positions would fly it straight through the tractor.
+---@return table
+function DroneCamCamera:getShotPose(vehicle, mode)
+    local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+    local px, py, pz, lx, ly, lz, yaw, pitch = self:getModeTransform(vehicle, mode)
+    local dx, dz = px - vx, pz - vz
+
+    return {
+        radius = math.sqrt(dx * dx + dz * dz),
+        bearing = math.atan2(dx, dz),
+        height = py - vy,
+        lookX = lx - vx, lookY = ly - vy, lookZ = lz - vz,
+        yaw = yaw, pitch = pitch,
+        overrideWeight = yaw ~= nil and 1 or 0
+    }
+end
+
+---Interpolates between two poses.
+---@param from table
+---@param to table
+---@param t number @Blend factor in [0, 1]
+---@return table
+function DroneCamCamera:blendPoses(from, to, t)
+    -- An overhead pose has no bearing of its own, so borrow the other one's.
+    local fromBearing, toBearing = from.bearing, to.bearing
+    if from.radius < DroneCamCamera.OVERHEAD_RADIUS then
+        fromBearing = toBearing
+    elseif to.radius < DroneCamCamera.OVERHEAD_RADIUS then
+        toBearing = fromBearing
+    end
+
+    -- Both ends move every frame (the vehicle turns, the orbit circles), so a
+    -- swing of about half a turn could flip between going left and going right.
+    -- Keep whichever way round the blend started on.
+    local bearingDiff = normaliseAngleDiff(toBearing - fromBearing)
+    if self.blendBearingDiff ~= nil then
+        bearingDiff = self.blendBearingDiff + normaliseAngleDiff(bearingDiff - self.blendBearingDiff)
+    end
+    self.blendBearingDiff = bearingDiff
+
+    local yaw, pitch
+    if from.overrideWeight > 0 and to.overrideWeight > 0 then
+        yaw = from.yaw + normaliseAngleDiff(to.yaw - from.yaw) * t
+        pitch = lerp(from.pitch, to.pitch, t)
+    elseif from.overrideWeight > 0 then
+        yaw, pitch = from.yaw, from.pitch
+    elseif to.overrideWeight > 0 then
+        yaw, pitch = to.yaw, to.pitch
+    end
+
+    return {
+        radius = lerp(from.radius, to.radius, t),
+        bearing = fromBearing + bearingDiff * t,
+        height = lerp(from.height, to.height, t),
+        lookX = lerp(from.lookX, to.lookX, t),
+        lookY = lerp(from.lookY, to.lookY, t),
+        lookZ = lerp(from.lookZ, to.lookZ, t),
+        yaw = yaw, pitch = pitch,
+        overrideWeight = lerp(from.overrideWeight, to.overrideWeight, t)
+    }
+end
+
+---@return number @Eased progress of the current change of angle, 1 when settled
+function DroneCamCamera:getShotBlendAlpha()
+    if self.fromPose == nil then
+        return 1
+    end
+
+    local duration = self.settings.shotBlendTime
+    if duration <= 0 then
+        return 1
+    end
+
+    return smoothstep(math.min(self.shotBlendElapsed / duration, 1))
+end
+
+---@return table @Pose currently being aimed for, mid-blend or not
+function DroneCamCamera:getCurrentPose(vehicle)
+    local pose = self:getShotPose(vehicle, self.shot)
+
+    if self.fromPose ~= nil then
+        pose = self:blendPoses(self.fromPose, pose, self:getShotBlendAlpha())
+    end
+
+    return pose
+end
+
+---@param heading number|nil @Raw vehicle heading in radians
+---@return integer @Angle that should be on screen
+function DroneCamCamera:getWantedShot(dtSeconds, heading)
+    local mode = self.settings.mode
+
+    if mode ~= DroneCamSettings.MODE_AUTO then
+        if self.director.isRunning then
+            self.director:reset()
+        end
+        return mode
+    end
+
+    if not self.director.isRunning then
+        -- Open on whatever is already on screen, so choosing the mode is not
+        -- itself a change of angle.
+        self.director:start(self.shot, heading)
+    end
+
+    return self.director:update(dtSeconds, heading)
+end
+
+---Follows the wanted angle, starting a blend whenever it changes.
+---@param heading number|nil @Raw vehicle heading in radians
+function DroneCamCamera:updateShot(dtSeconds, vehicle, heading)
+    local wanted = self:getWantedShot(dtSeconds, heading)
+
+    if self.shot == nil then
+        -- First frame after activation: the activation blend already eases in.
+        self.shot = wanted
+    elseif wanted ~= self.shot then
+        -- Freeze wherever the camera is aiming right now, part-way through an
+        -- earlier blend included, so a quick second change never jumps.
+        self.fromPose = self:getCurrentPose(vehicle)
+        self.shotBlendElapsed = 0
+        self.blendBearingDiff = nil
+        self.shot = wanted
+
+        if wanted == DroneCamSettings.MODE_ORBIT then
+            -- Start circling from the camera's current bearing rather than
+            -- wherever the orbit angle last happened to be.
+            local vx, _, vz = getWorldTranslation(vehicle.rootNode)
+            local dx, dz = self.posX - vx, self.posZ - vz
+            if dx * dx + dz * dz > DroneCamCamera.OVERHEAD_RADIUS * DroneCamCamera.OVERHEAD_RADIUS then
+                self.orbitAngle = math.atan2(dx, dz)
+            else
+                self.orbitAngle = self.heading + math.pi
+            end
+        end
+    elseif self.fromPose ~= nil then
+        self.shotBlendElapsed = self.shotBlendElapsed + dtSeconds
+
+        if self.shotBlendElapsed >= self.settings.shotBlendTime then
+            self.fromPose = nil
+            self.blendBearingDiff = nil
+        end
+    end
+end
+
+---Desired transform for the angle on screen, blended while it changes.
+---@return number, number, number @Desired camera position
+---@return number, number, number @Desired look target
+---@return number|nil, number|nil @Yaw and pitch override
+---@return number @How much of the override to apply, 0..1
+function DroneCamCamera:getShotTransform(vehicle)
+    if self.fromPose == nil then
+        local px, py, pz, lx, ly, lz, yaw, pitch = self:getModeTransform(vehicle, self.shot)
+        return px, py, pz, lx, ly, lz, yaw, pitch, yaw ~= nil and 1 or 0
+    end
+
+    local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+    local pose = self:getCurrentPose(vehicle)
+
+    return vx + math.sin(pose.bearing) * pose.radius,
+           vy + pose.height,
+           vz + math.cos(pose.bearing) * pose.radius,
+           vx + pose.lookX, vy + pose.lookY, vz + pose.lookZ,
+           pose.yaw, pose.pitch, pose.overrideWeight
 end
 
 ---Raises the camera while the line from the aim point to the camera is blocked
@@ -337,8 +532,9 @@ function DroneCamCamera:update(dt, vehicle)
     -- Smooth the vehicle heading first; every mode is built on top of it, so a
     -- U-turn becomes a slow sweeping pan rather than a snap.
     local dirX, _, dirZ = localDirectionToWorld(vehicle.rootNode, 0, 0, 1)
+    local targetHeading = nil
     if dirX ~= 0 or dirZ ~= 0 then
-        local targetHeading = math.atan2(dirX, dirZ)
+        targetHeading = math.atan2(dirX, dirZ)
         self.heading = self.heading
             + normaliseAngleDiff(targetHeading - self.heading) * smoothingAlpha(dtSeconds, settings.headingStiffness)
     end
@@ -349,6 +545,7 @@ function DroneCamCamera:update(dt, vehicle)
     local desiredPosX, desiredPosY, desiredPosZ
     local desiredLookX, desiredLookY, desiredLookZ
     local yawOverride, pitchOverride
+    local overrideWeight = 0
 
     if isBlendingOut then
         self.blendTime = self.blendTime + dtSeconds
@@ -366,9 +563,11 @@ function DroneCamCamera:update(dt, vehicle)
     else
         self.blendTime = math.min(self.blendTime + dtSeconds, math.max(settings.blendTime, 0.0001))
 
+        self:updateShot(dtSeconds, vehicle, targetHeading)
+
         desiredPosX, desiredPosY, desiredPosZ,
         desiredLookX, desiredLookY, desiredLookZ,
-        yawOverride, pitchOverride = self:getModeTransform(vehicle)
+        yawOverride, pitchOverride, overrideWeight = self:getShotTransform(vehicle)
 
         local swayX, swayY, swayZ = self:getSwayOffset()
         desiredPosX = desiredPosX + swayX
@@ -416,12 +615,22 @@ function DroneCamCamera:update(dt, vehicle)
 
     local rotX, rotY = 0, 0
 
-    if pitchOverride ~= nil and yawOverride ~= nil then
-        rotX, rotY = pitchOverride, yawOverride
-    elseif length > 0.001 then
+    if length > 0.001 then
         local invLength = 1 / length
         rotX = math.asin(math.min(math.max(dy * invLength, -1), 1))
         rotY = math.atan2(-dx * invLength, -dz * invLength)
+    end
+
+    -- Top-down fixes its rotation outright. While blending to or from it, ease
+    -- between that and the aimed rotation; the aimed yaw is unstable straight
+    -- overhead, but its weight has reached zero by the time the camera is there.
+    if pitchOverride ~= nil and yawOverride ~= nil and overrideWeight > 0 then
+        if overrideWeight >= 1 then
+            rotX, rotY = pitchOverride, yawOverride
+        else
+            rotX = lerp(rotX, pitchOverride, overrideWeight)
+            rotY = rotY + normaliseAngleDiff(yawOverride - rotY) * overrideWeight
+        end
     end
 
     setWorldRotation(self.cameraNode, rotX, rotY, 0)

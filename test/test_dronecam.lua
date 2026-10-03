@@ -155,6 +155,7 @@ function addModEventListener(l) listeners[#listeners + 1] = l end
 
 dofile(MOD .. "/scripts/DroneCamSettings.lua")
 dofile(MOD .. "/scripts/DroneCamWorkDetect.lua")
+dofile(MOD .. "/scripts/DroneCamDirector.lua")
 dofile(MOD .. "/scripts/DroneCamCamera.lua")
 dofile(MOD .. "/scripts/DroneCam.lua")
 
@@ -194,7 +195,8 @@ g_localPlayer = {
 local heading = 0
 
 ---Advances simulated time, moving the vehicle forward and stamping its work area.
-local function tick(seconds, working, headingRate)
+---onStep, if given, is called after every frame.
+local function tick(seconds, working, headingRate, onStep)
     local dt = 16
     local steps = math.floor(seconds * 1000 / dt)
     for _ = 1, steps do
@@ -219,6 +221,10 @@ local function tick(seconds, working, headingRate)
         end
 
         DroneCam:update(dt)
+
+        if onStep ~= nil then
+            onStep(dt / 1000)
+        end
     end
 end
 
@@ -424,14 +430,279 @@ DroneCam.settings.followAI = false
 tick(9, false)
 vehicle.getChildVehicles = function(self) return { self } end
 
+------------------------------------------------------------- auto director
+
+---Park-Miller generator with math.random's calling convention, so the
+---director's choices are the same on every platform.
+local function makeRng(seed)
+    local state = seed
+    return function(n)
+        state = (state * 16807) % 2147483647
+        local f = (state - 1) / 2147483646
+        if n == nil then
+            return f
+        end
+        return math.floor(f * n) + 1
+    end
+end
+
+local function wrapAngle(a)
+    while a > math.pi do a = a - 2 * math.pi end
+    while a < -math.pi do a = a + 2 * math.pi end
+    return a
+end
+
+---Largest per-frame camera move (metres) and turn (degrees) while ticking.
+---A hard cut shows up as tens of metres or tens of degrees in a single frame.
+local function measureMotion(seconds, working, headingRate, onStep)
+    local px, py, pz = getWorldTranslation(cn)
+    local prx, pry = nodes[cn].rx, nodes[cn].ry
+    local maxStep, maxTurn = 0, 0
+
+    tick(seconds, working, headingRate, function(dtSeconds)
+        local x, y, z = getWorldTranslation(cn)
+        local rx, ry = nodes[cn].rx, nodes[cn].ry
+        maxStep = math.max(maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
+        maxTurn = math.max(maxTurn, math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))
+        px, py, pz, prx, pry = x, y, z, rx, ry
+        if onStep ~= nil then onStep(dtSeconds) end
+    end)
+
+    return maxStep, maxTurn
+end
+
+-- Per-frame limits for "no hard cuts", at 16ms frames. The vehicle itself
+-- moves 0.13m a frame; a cut between angles is a 40-80m or 45-90 degree jump.
+local MAX_STEP = 2.5
+local MAX_TURN = 4
+
+local CHASE = DroneCamSettings.MODE_CHASE
+local TOPDOWN = DroneCamSettings.MODE_TOPDOWN
+local ORBIT = DroneCamSettings.MODE_ORBIT
+local AUTO = DroneCamSettings.MODE_AUTO
+
+print("\n-- auto director: mode cycle --")
+tick(12, false)
+DroneCam.settings.mode = CHASE
+local cycled = {}
+for i = 1, 4 do
+    DroneCam:onCycleMode()
+    cycled[i] = DroneCam.settings.mode
+end
+check("Ctrl+C cycles chase -> top-down -> orbit -> auto -> chase",
+      cycled[1] == TOPDOWN and cycled[2] == ORBIT and cycled[3] == AUTO and cycled[4] == CHASE,
+      table.concat(cycled, ","))
+DroneCam.settings.mode = ORBIT
+DroneCam:onCycleMode()
+check("auto director is announced by name", NOTIFICATIONS[#NOTIFICATIONS] == "droneCam_mode: droneCam_mode_auto",
+      NOTIFICATIONS[#NOTIFICATIONS])
+DroneCam.settings.mode = CHASE
+
+print("\n-- auto director: choosing angles --")
+local director = DroneCamDirector.new(DroneCam.settings)
+director.random = makeRng(12345)
+director:start(CHASE, 0)
+
+local switches, repeats = 0, 0
+local seen = {}
+local held, minHeld, maxHeld = 0, math.huge, 0
+local lastShot = director.shot
+for _ = 1, 40000 do -- 2000 simulated seconds, driving dead straight
+    held = held + 0.05
+    local previousTime = director.shotTime
+    local shot = director:update(0.05, 0)
+    if director.shotTime < previousTime then
+        switches = switches + 1
+        if shot == lastShot then repeats = repeats + 1 end
+        minHeld, maxHeld = math.min(minHeld, held), math.max(maxHeld, held)
+        seen[shot] = true
+        held = 0
+    end
+    lastShot = shot
+end
+check("switches angle regularly", switches > 120, tostring(switches))
+check("never repeats the same angle twice in a row", repeats == 0, tostring(repeats))
+check("uses chase, top-down and orbit", seen[CHASE] and seen[TOPDOWN] and seen[ORBIT])
+check("holds each angle at least 10s", minHeld >= 10 - 1e-6, ("min=%.2f"):format(minHeld))
+check("holds each angle at most 15s", maxHeld <= 15 + 0.05 + 1e-6, ("max=%.2f"):format(maxHeld))
+check("hold times spread across 10-15s", minHeld < 10.5 and maxHeld > 14.5,
+      ("min=%.2f max=%.2f"):format(minHeld, maxHeld))
+
+local fresh = DroneCamDirector.new(DroneCam.settings)
+fresh.random = makeRng(99)
+fresh:start(nil, 0)
+check("starts on a random angle when none is on screen",
+      fresh.shot == CHASE or fresh.shot == TOPDOWN or fresh.shot == ORBIT, tostring(fresh.shot))
+fresh:start(DroneCamSettings.MODE_AUTO, 0)
+check("never opens on auto itself", fresh.shot ~= DroneCamSettings.MODE_AUTO)
+
+print("\n-- auto director: holds through a headland turn --")
+local dt = 0.016
+local function runDirector(d, seconds, headingAt, startTime)
+    local t = startTime
+    local switchedAt = nil
+    local before = d.shot
+    for _ = 1, math.floor(seconds / dt) do
+        t = t + dt
+        d:update(dt, headingAt(t))
+        if switchedAt == nil and d.shot ~= before then switchedAt = t end
+    end
+    return t, switchedAt
+end
+
+local turner = DroneCamDirector.new(DroneCam.settings)
+turner.random = makeRng(4242)
+turner:start(CHASE, 0)
+turner.shotLength = 10
+local turnStart, turnRate, turnLength = 8, math.rad(30), 5
+local function headlandHeading(t)
+    if t < turnStart then return 0 end
+    return math.min(t - turnStart, turnLength) * turnRate
+end
+local t, switchedAt = runDirector(turner, turnStart, headlandHeading, 0)
+check("no change on the straight before the shot is due", switchedAt == nil)
+t, switchedAt = runDirector(turner, turnLength, headlandHeading, t)
+check("recognises a 30 deg/s headland turn", turner:getIsTurning())
+check("does not change angle mid-turn, even when overdue", switchedAt == nil,
+      ("switched at %.2fs"):format(switchedAt or -1))
+local straightAgain = t
+t, switchedAt = runDirector(turner, 6, headlandHeading, t)
+check("changes angle once straight again", switchedAt ~= nil)
+local waited = (switchedAt or 0) - straightAgain
+check("waits until the vehicle has settled on the new line",
+      waited >= DroneCamDirector.STRAIGHT_SETTLE_TIME and waited < 3.5, ("waited %.2fs"):format(waited))
+
+local wobbler = DroneCamDirector.new(DroneCam.settings)
+wobbler.random = makeRng(7)
+wobbler:start(CHASE, 0)
+wobbler.shotLength = 10
+-- Steering corrections: +-1.5 degrees of heading, about 3 deg/s at the peak.
+local _, wobbleSwitch = runDirector(wobbler, 14, function(t2) return math.rad(1.5) * math.sin(t2 * 2) end, 0)
+check("ordinary steering corrections do not hold the cut", wobbleSwitch ~= nil and wobbleSwitch < 11,
+      ("switched at %s"):format(tostring(wobbleSwitch)))
+
+print("\n-- auto director: in flight --")
+tick(12, false)
+DroneCam.settings.mode = AUTO
+tick(3, true)
+check("engages in auto director mode", droneIsActive())
+local camera = DroneCam.camera
+check("director running", camera.director.isRunning)
+check("flying one of the three angles",
+      camera.shot == CHASE or camera.shot == TOPDOWN or camera.shot == ORBIT, tostring(camera.shot))
+camera.director.random = makeRng(2024)
+
+local changes, sameTwice = 0, 0
+local blendLengths = {}
+local blending = 0
+local shotSeen = camera.shot
+local maxStep, maxTurn = measureMotion(75, true, 0, function(dtSeconds)
+    if camera.shot ~= shotSeen then
+        changes = changes + 1
+        shotSeen = camera.shot
+    end
+    if camera.fromPose ~= nil then
+        blending = blending + dtSeconds
+    elseif blending > 0 then
+        blendLengths[#blendLengths + 1] = blending
+        blending = 0
+    end
+end)
+print(("        75s: %d changes, worst frame %.2fm / %.2f deg"):format(changes, maxStep, maxTurn))
+check("changes angle several times in 75s", changes >= 4 and changes <= 8, tostring(changes))
+check("no hard cut in position", maxStep < MAX_STEP, ("%.2fm in one frame"):format(maxStep))
+check("no hard cut in rotation", maxTurn < MAX_TURN, ("%.2f deg in one frame"):format(maxTurn))
+local blendOk = #blendLengths >= 4
+for i = 1, #blendLengths do
+    if math.abs(blendLengths[i] - 2) > 0.05 then blendOk = false end
+end
+check("each change blends over about 2 seconds", blendOk, table.concat(blendLengths, ", "))
+
+print("\n-- auto director: no change during a headland in flight --")
+tick(4, true) -- let any blend in progress finish
+camera.director.shotTime = camera.director.shotLength - 0.5
+local shotBeforeTurn = camera.shot
+tick(5, true, math.rad(40))
+check("angle held through the turn", camera.shot == shotBeforeTurn and camera.fromPose == nil)
+tick(4, true)
+check("angle changes after the turn", camera.shot ~= shotBeforeTurn)
+tick(3, true)
+
+print("\n-- auto director: entering and leaving --")
+tick(12, false)
+DroneCam.settings.mode = ORBIT
+tick(6, true)
+check("flying orbit", droneIsActive() and camera.shot == ORBIT)
+DroneCam:onCycleMode()
+tick(0.5, true)
+check("switching to auto keeps the angle on screen", camera.shot == ORBIT and camera.fromPose == nil)
+camera.director.shotTime = camera.director.shotLength
+local _, turnOnCut = measureMotion(3, true)
+check("first auto change is smooth", camera.shot ~= ORBIT and turnOnCut < MAX_TURN, ("%.2f deg"):format(turnOnCut))
+camera.director.shotTime = 0
+tick(8, true)
+local autoShot = camera.shot
+DroneCam.settings.mode = autoShot == CHASE and DroneCamSettings.MODE_TOPDOWN or CHASE
+local leaveStep, leaveTurn = measureMotion(3, true)
+check("leaving auto blends instead of cutting", leaveStep < MAX_STEP and leaveTurn < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(leaveStep, leaveTurn))
+check("director stopped outside auto", not camera.director.isRunning)
+
+print("\n-- manual changes blend too --")
+DroneCam.settings.mode = CHASE
+tick(4, true)
+DroneCam.settings.mode = TOPDOWN
+local manualStep, manualTurn = measureMotion(3, true)
+check("chase -> top-down by hand is smooth", manualStep < MAX_STEP and manualTurn < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(manualStep, manualTurn))
+local _, lookDown = localDirectionToWorld(cn, 0, 0, -1)
+check("and still ends looking straight down", lookDown < -0.98, ("dy=%.3f"):format(lookDown))
+DroneCam.settings.mode = ORBIT
+local quickStep, quickTurn = measureMotion(0.5, true)
+DroneCam.settings.mode = CHASE
+local quickStep2, quickTurn2 = measureMotion(3, true)
+check("a second change mid-blend does not jump",
+      math.max(quickStep, quickStep2) < MAX_STEP and math.max(quickTurn, quickTurn2) < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(math.max(quickStep, quickStep2), math.max(quickTurn, quickTurn2)))
+
+tick(4, true)
+
+-- The orbit keeps circling while it is not on screen. Park it in front of the
+-- vehicle: taking it up as-is would swing the camera half way round.
+camera.orbitAngle = camera.heading
+local function bearingFromBehind()
+    local x, _, z = getWorldTranslation(cn)
+    local vx2, _, vz2 = getWorldTranslation(vehicle.rootNode)
+    return math.deg(math.abs(wrapAngle(math.atan2(x - vx2, z - vz2) - (camera.heading + math.pi))))
+end
+local worstSwing = 0
+DroneCam.settings.mode = ORBIT
+tick(2.5, true, 0, function() worstSwing = math.max(worstSwing, bearingFromBehind()) end)
+check("chase -> orbit picks up the orbit from behind the vehicle", worstSwing < 30,
+      ("swung %.0f deg round"):format(worstSwing))
+
+-- Proves the limits above would catch a cut: with the blend switched off the
+-- same change has to fail them.
+DroneCam.settings.shotBlendTime = 0
+DroneCam.settings.mode = TOPDOWN
+local _, cutTurn = measureMotion(0.1, true)
+check("sanity: without blending the change is a hard cut", cutTurn > MAX_TURN * 5, ("%.2f deg"):format(cutTurn))
+DroneCam.settings.shotBlendTime = 2
+DroneCam.settings.mode = CHASE
+tick(12, false)
+
 print("\n-- settings round trip --")
 DroneCam.settings.chaseDistance = 55
 DroneCam.settings.sway = false
+DroneCam.settings.mode = AUTO
 DroneCamSettings.store(DroneCam.settings)
 local reloaded = DroneCamSettings.new()
 DroneCamSettings.restore(reloaded)
 check("float persisted", reloaded.chaseDistance == 55)
 check("bool persisted", reloaded.sway == false)
+check("auto director mode persisted", reloaded.mode == AUTO, tostring(reloaded.mode))
+check("director timings default to 10-15s with a 2s blend",
+      reloaded.directorMinShot == 10 and reloaded.directorMaxShot == 15 and reloaded.shotBlendTime == 2)
 
 print("\n-- out of range values are clamped --")
 CURRENT = STORE[DroneCamSettings.getXmlFilePath()]
