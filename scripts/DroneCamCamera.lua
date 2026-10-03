@@ -28,6 +28,57 @@ DroneCamCamera.OBSTACLE_MAX_RISE = 60
 ---Terrain is sampled on a small grid rather than at a single point so a sharp
 ---ridge just under the camera still pushes it up.
 DroneCamCamera.TERRAIN_SAMPLE_STEP = 3
+---Close-ups sit low, so they sample a tighter grid: a ridge 3m away should not
+---lift a camera that is filming a wheel.
+DroneCamCamera.CLOSEUP_TERRAIN_SAMPLE_STEP = 1
+
+---Below this ratio of horizontal to total length, the view is close enough to
+---vertical that its heading is only partly trusted (about 20 degrees from
+---straight down).
+DroneCamCamera.YAW_TRUST_TILT = 0.35
+
+---Fastest the view may turn left or right, in radians per second. Well above
+---anything the vehicle itself does, so it only ever limits camera blends.
+DroneCamCamera.MAX_YAW_RATE = math.rad(120)
+
+---Close-ups replace the minClearance height floor with this one.
+DroneCamCamera.CLOSEUP_CLEARANCE = 0.6
+
+---Absolute minimum height above the ground for the camera itself, whatever it
+---is aiming for. Just above the 0.5m near clip plane.
+DroneCamCamera.HARD_GROUND_CLEARANCE = 0.55
+
+---How far close-ups keep from the vehicle's footprint. More than DroneCamRig's
+---margin plus fade, so a close-up at rest is never being lifted by them.
+DroneCamCamera.CLOSEUP_GAP = 2.3
+
+---Mature crop heights in metres by fruit type name. Generous on purpose: the
+---cost of overestimating is a slightly higher shot, of underestimating a
+---camera inside the maize. Unknown crops (mods) get the default.
+DroneCamCamera.CROP_HEIGHTS = {
+    WHEAT = 1.2, BARLEY = 1.1, OAT = 1.3, RYE = 1.6, TRITICALE = 1.4, SPELT = 1.4,
+    CANOLA = 1.8, SOYBEAN = 1.1, SUNFLOWER = 2.5, MAIZE = 3.2, SORGHUM = 2.4,
+    SUGARCANE = 4.5, COTTON = 1.5, RICE = 1.2, RICELONGGRAIN = 1.2, POPLAR = 8,
+    GRASS = 0.8, MEADOW = 0.8, OILSEEDRADISH = 1.0, ALFALFA = 0.9, CLOVER = 0.6,
+    POTATO = 0.7, SUGARBEET = 0.7, CARROT = 0.6, PARSNIP = 0.6, REDBEET = 0.6,
+    GREENBEAN = 0.8, PEA = 1.0, SPINACH = 0.4, ONION = 0.6, GRAPE = 2.2, OLIVE = 4
+}
+DroneCamCamera.DEFAULT_CROP_HEIGHT = 2
+
+---Distance kept above the estimated crop top.
+DroneCamCamera.CROP_MARGIN = 0.6
+DroneCamCamera.CROP_HARD_MARGIN = 0.3
+
+---Crop is only looked up when the camera is lower than this above the ground;
+---every wide angle flies far higher than any crop.
+DroneCamCamera.CROP_CHECK_HEIGHT = 6
+
+---The crop floor is sampled this far around the target position, then rate
+---limited, so the camera rises before it reaches the edge of standing crop
+---rather than jumping when it gets there.
+DroneCamCamera.CROP_SAMPLE_STEP = 2
+DroneCamCamera.CROP_RISE_SPEED = 20
+DroneCamCamera.CROP_FALL_SPEED = 3
 
 local function lerp(from, to, alpha)
     return from + (to - from) * alpha
@@ -91,6 +142,9 @@ function DroneCamCamera.new(settings)
     self.appliedFov = settings.fov
 
     self.director = DroneCamDirector.new(settings)
+    self.director.isShotAvailable = function(shot)
+        return self:getIsShotAvailable(shot)
+    end
 
     self:resetState()
 
@@ -120,13 +174,28 @@ function DroneCamCamera:resetState()
     self.blendTime = 0
     self.returnNode = nil
     self.blendOutActive = false
+    self.vehicleHeading = 0
+    self:resetTracking()
     self:resetShot()
+end
+
+---Forgets per-flight state used by the close-ups.
+function DroneCamCamera:resetTracking()
+    self.rig = nil
+    self.lastVehicleX, self.lastVehicleY, self.lastVehicleZ = nil, nil, nil
+    self.cropFloor = 0
+    self.lastRotY = nil
+    -- The flight starts from the vehicle's own camera, which is usually inside
+    -- the cab. The hard floors that keep the camera out of the vehicle and the
+    -- crop only take hold once it has flown clear, or they would yank it out.
+    self.floorsArmed = false
 end
 
 ---Forgets which angle is on screen, so the next frame takes up the wanted one
 ---directly instead of blending to it.
 function DroneCamCamera:resetShot()
     self.shot = nil
+    self.shotSide = 1
     self.fromPose = nil
     self.shotBlendElapsed = 0
     self.blendBearingDiff = nil
@@ -150,6 +219,7 @@ function DroneCamCamera:activate(fromNode, vehicle)
     self.blendTime = 0
     self.returnNode = nil
     self.blendOutActive = false
+    self:resetTracking()
     self:resetShot()
 
     local seeded = false
@@ -168,6 +238,7 @@ function DroneCamCamera:activate(fromNode, vehicle)
         local dirX, _, dirZ = localDirectionToWorld(vehicle.rootNode, 0, 0, 1)
 
         self.heading = math.atan2(dirX, dirZ)
+        self.vehicleHeading = self.heading
         -- Start the orbit behind the vehicle so the first frame is not a
         -- side-on view that then swings round.
         self.orbitAngle = self.heading + math.pi
@@ -216,14 +287,15 @@ function DroneCamCamera:applyFov()
 end
 
 ---Highest terrain height on a small grid around the given world position.
+---@param step number|nil @Grid spacing, TERRAIN_SAMPLE_STEP by default
 ---@return number
-local function getTerrainHeightAround(x, z)
+local function getTerrainHeightAround(x, z, step)
     local terrainNode = getTerrainNode()
     if terrainNode == nil then
         return 0
     end
 
-    local step = DroneCamCamera.TERRAIN_SAMPLE_STEP
+    step = step or DroneCamCamera.TERRAIN_SAMPLE_STEP
     local height = getTerrainHeightAtWorldPos(terrainNode, x, 0, z)
 
     for offsetX = -step, step, step do
@@ -236,6 +308,58 @@ local function getTerrainHeightAround(x, z)
     end
 
     return height
+end
+
+---@return number @Terrain height straight below the position
+local function getTerrainHeightAt(x, z)
+    local terrainNode = getTerrainNode()
+    if terrainNode == nil then
+        return 0
+    end
+    return getTerrainHeightAtWorldPos(terrainNode, x, 0, z)
+end
+
+---Estimated height of the crop standing at a position, 0 for bare ground or
+---stubble. Growing crop scales with its growth stage; harvest-ready and later
+---stages count as fully grown.
+---@return number
+function DroneCamCamera.getCropHeightAt(x, z)
+    if FSDensityMapUtil == nil or FSDensityMapUtil.getFruitTypeIndexAtWorldPos == nil or g_fruitTypeManager == nil then
+        return 0
+    end
+
+    local fruitTypeIndex, growthState = FSDensityMapUtil.getFruitTypeIndexAtWorldPos(x, z)
+    if fruitTypeIndex == nil or fruitTypeIndex == 0 or growthState == nil or growthState == 0 then
+        return 0
+    end
+
+    local fruitType = g_fruitTypeManager:getFruitTypeByIndex(fruitTypeIndex)
+    if fruitType == nil then
+        return DroneCamCamera.DEFAULT_CROP_HEIGHT
+    end
+
+    if fruitType.cutState ~= nil and fruitType.cutState > 0 and growthState == fruitType.cutState then
+        return 0
+    end
+
+    local fullHeight = DroneCamCamera.CROP_HEIGHTS[fruitType.name] or DroneCamCamera.DEFAULT_CROP_HEIGHT
+    local readyState = fruitType.minHarvestingGrowthState or 0
+
+    if readyState > 0 and growthState < readyState then
+        return fullHeight * math.max(growthState / readyState, 0.25)
+    end
+
+    return fullHeight
+end
+
+---Tallest crop on a small cross of samples around a position.
+local function getCropHeightAround(x, z)
+    local step = DroneCamCamera.CROP_SAMPLE_STEP
+    return math.max(DroneCamCamera.getCropHeightAt(x, z),
+                    DroneCamCamera.getCropHeightAt(x + step, z),
+                    DroneCamCamera.getCropHeightAt(x - step, z),
+                    DroneCamCamera.getCropHeightAt(x, z + step),
+                    DroneCamCamera.getCropHeightAt(x, z - step))
 end
 
 ---Low-amplitude, low-frequency drift so the shot never looks perfectly rigid.
@@ -265,6 +389,10 @@ end
 ---@return number|nil @Explicit yaw override (used by the top-down mode)
 ---@return number|nil @Explicit pitch override
 function DroneCamCamera:getModeTransform(vehicle, mode)
+    if DroneCamDirector.getIsCloseUp(mode) then
+        return self:getCloseUpTransform(vehicle, mode)
+    end
+
     local settings = self.settings
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
 
@@ -302,31 +430,159 @@ function DroneCamCamera:getModeTransform(vehicle, mode)
            nil, nil
 end
 
+---Measurements of the vehicle combination, taken at most once per frame.
+---@return table|nil
+function DroneCamCamera:getRig(vehicle)
+    if self.rig == nil and vehicle ~= nil then
+        self.rig = DroneCamRig.measure(vehicle, self.vehicleHeading)
+    end
+    return self.rig
+end
+
+---@return boolean @False for a close-up with nothing to film
+function DroneCamCamera:getIsShotAvailable(shot)
+    if shot == DroneCamSettings.SHOT_IMPLEMENT then
+        local rig = self:getRig(self.vehicle)
+        return rig ~= nil and rig.work ~= nil
+    end
+    return true
+end
+
+---Close-up angles, placed from the measured rig so they scale with it. Every
+---position keeps at least CLOSEUP_GAP from the vehicle footprints; heights are
+---above the ground at the vehicle and are lifted further by the crop and
+---terrain floors in update().
+---@return number, number, number, number, number, number, nil, nil
+function DroneCamCamera:getCloseUpTransform(vehicle, shot)
+    local rig = self:getRig(vehicle)
+    local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
+
+    if rig == nil then
+        return vx, vy + self.settings.chaseHeight, vz, vx, vy, vz, nil, nil
+    end
+
+    local side = self.shotSide
+    local scale = rig.scale
+    local gap = DroneCamCamera.CLOSEUP_GAP
+    local ground = rig.ground
+
+    -- Camera and aim point in the rig's frame: x across, z along, y up from the ground.
+    local cx, cy, cz, lx, ly, lz
+
+    if shot == DroneCamSettings.SHOT_WHEEL then
+        -- Low beside the rear wheel and a little ahead of it, so the tread
+        -- turns towards the lens.
+        local wheel = DroneCamRig.getRearWheel(rig, side)
+        local wheelHeight = math.max(wheel.radius, 0.4)
+
+        cx = side * (math.max(rig.rootHalfWidth, math.abs(wheel.lx) + wheel.radius * 0.5) + gap)
+        cz = wheel.lz + wheel.radius * 1.5
+        cy = math.max(wheelHeight, DroneCamCamera.CLOSEUP_CLEARANCE)
+        lx, ly, lz = wheel.lx, wheelHeight, wheel.lz
+
+    elseif shot == DroneCamSettings.SHOT_IMPLEMENT and rig.work ~= nil then
+        local work = rig.work
+
+        if work.isFront then
+            -- Header or front mower: off the end of it and a little ahead,
+            -- watching the crop go in. There is no "behind" that is not the
+            -- vehicle itself.
+            cx = side * (math.max(math.abs(work.lx) + work.halfWidth, rig.halfWidth) + gap)
+            cz = work.lz + 1.5 * scale
+            cy = 1.6 * scale
+            lx, ly, lz = work.lx + side * work.halfWidth * 0.5, 0.8, work.lz
+        else
+            -- Behind the rearmost implement, low, looking forward and down at
+            -- the strip it has just worked.
+            cx = work.lx + side * work.halfWidth * 0.35
+            cz = rig.rear - gap - 0.15 * work.halfWidth
+            cy = 1.3 * scale + 0.1 * work.halfWidth
+            lx, ly, lz = work.lx, 0.2, math.max(work.lz - 1, rig.rear + 0.5)
+        end
+
+    elseif shot == DroneCamSettings.SHOT_SIDE then
+        -- About 3m up and 8m out from the side, level with the middle of the rig.
+        local middle = (rig.front + rig.rear) * 0.5
+        cx = side * (rig.halfWidth + 8 * scale)
+        cz = middle
+        cy = 3 * scale
+        lx, ly, lz = 0, rig.rootHeight * 0.5, middle
+
+    elseif shot == DroneCamSettings.SHOT_FRONT then
+        -- Ahead and low, just off the line, looking back at the vehicle
+        -- coming towards the lens.
+        cx = side * 1.5 * scale
+        cz = rig.front + 10 * scale
+        cy = math.max(scale, DroneCamCamera.CLOSEUP_CLEARANCE)
+        lx, ly, lz = 0, rig.rootHeight * 0.6, rig.rootFront
+
+    else
+        -- Rear quarter (and the implement shot's fallback): behind and out to
+        -- one side at cab height, aiming at the cab.
+        cx = side * (rig.halfWidth + 4 * scale)
+        cz = rig.rootRear - 4 * scale
+        cy = rig.rootHeight * 0.85
+        lx, ly, lz = 0, rig.rootHeight * 0.75, (rig.rootFront + rig.rootRear) * 0.5
+    end
+
+    local px, pz = DroneCamRig.toWorld(rig, cx, cz)
+    local tx, tz = DroneCamRig.toWorld(rig, lx, lz)
+
+    return px, ground + cy, pz, tx, ground + ly, tz, nil, nil
+end
+
 ---Radius below which a pose is treated as directly overhead and so has no
 ---meaningful bearing of its own.
 DroneCamCamera.OVERHEAD_RADIUS = 1
 
+---How far above the vehicle's roof a close-up blend arcs at the peak of a
+---quarter turn or more round it.
+DroneCamCamera.ARC_CLEARANCE = 2
+
 local function smoothstep(t)
     return t * t * (3 - 2 * t)
+end
+
+---How tightly an angle follows the vehicle's movement (see update()) and how
+---high above the terrain it must stay.
+---@return number, number @Tracking 0..1, terrain clearance in metres
+function DroneCamCamera:getShotTracking(shot)
+    if DroneCamDirector.getIsCloseUp(shot) then
+        return 1, DroneCamCamera.CLOSEUP_CLEARANCE
+    end
+    return 0, self.settings.minClearance
 end
 
 ---Describes one angle relative to the vehicle: bearing, radius and height of the
 ---camera around it, and the look target as an offset from it. Blending in these
 ---terms swings the camera round the vehicle at a distance, where blending world
 ---positions would fly it straight through the tractor.
+---
+---Bearings, yaw and the look offset are measured from the vehicle's heading, so
+---a pose frozen at the start of a blend turns with the vehicle: a close-up
+---being left during a turn stays beside the wheel instead of the wheel driving
+---into it.
 ---@return table
 function DroneCamCamera:getShotPose(vehicle, mode)
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
     local px, py, pz, lx, ly, lz, yaw, pitch = self:getModeTransform(vehicle, mode)
     local dx, dz = px - vx, pz - vz
+    local heading = self.vehicleHeading
+    local fwdX, fwdZ = math.sin(heading), math.cos(heading)
+    local lookDX, lookDZ = lx - vx, lz - vz
+    local tracking, clearance = self:getShotTracking(mode)
 
     return {
         radius = math.sqrt(dx * dx + dz * dz),
-        bearing = math.atan2(dx, dz),
+        bearing = math.atan2(dx, dz) - heading,
         height = py - vy,
-        lookX = lx - vx, lookY = ly - vy, lookZ = lz - vz,
-        yaw = yaw, pitch = pitch,
-        overrideWeight = yaw ~= nil and 1 or 0
+        lookAcross = lookDX * fwdZ - lookDZ * fwdX,
+        lookY = ly - vy,
+        lookAlong = lookDX * fwdX + lookDZ * fwdZ,
+        yaw = yaw ~= nil and yaw - heading or nil, pitch = pitch,
+        overrideWeight = yaw ~= nil and 1 or 0,
+        tracking = tracking,
+        clearance = clearance
     }
 end
 
@@ -353,6 +609,18 @@ function DroneCamCamera:blendPoses(from, to, t)
     end
     self.blendBearingDiff = bearingDiff
 
+    -- A low close-up swinging round to the other side would sweep past the
+    -- implement at wheel height. Lift the path into an arc over the vehicle,
+    -- more the further round it goes, so it flies over instead of being
+    -- shoved up by the vehicle floor at the last moment.
+    local arcLift = 0
+    if from.tracking > 0 or to.tracking > 0 then
+        local rig = self.rig
+        local vehicleHeight = rig ~= nil and rig.rootHeight or DroneCamRig.DEFAULT_HEIGHT
+        local swing = math.min(math.abs(bearingDiff) / (math.pi * 0.5), 1)
+        arcLift = (vehicleHeight + DroneCamCamera.ARC_CLEARANCE) * swing * math.sin(math.pi * t)
+    end
+
     local yaw, pitch
     if from.overrideWeight > 0 and to.overrideWeight > 0 then
         yaw = from.yaw + normaliseAngleDiff(to.yaw - from.yaw) * t
@@ -366,12 +634,14 @@ function DroneCamCamera:blendPoses(from, to, t)
     return {
         radius = lerp(from.radius, to.radius, t),
         bearing = fromBearing + bearingDiff * t,
-        height = lerp(from.height, to.height, t),
-        lookX = lerp(from.lookX, to.lookX, t),
+        height = lerp(from.height, to.height, t) + arcLift,
+        lookAcross = lerp(from.lookAcross, to.lookAcross, t),
         lookY = lerp(from.lookY, to.lookY, t),
-        lookZ = lerp(from.lookZ, to.lookZ, t),
+        lookAlong = lerp(from.lookAlong, to.lookAlong, t),
         yaw = yaw, pitch = pitch,
-        overrideWeight = lerp(from.overrideWeight, to.overrideWeight, t)
+        overrideWeight = lerp(from.overrideWeight, to.overrideWeight, t),
+        tracking = lerp(from.tracking, to.tracking, t),
+        clearance = lerp(from.clearance, to.clearance, t)
     }
 end
 
@@ -429,13 +699,17 @@ function DroneCamCamera:updateShot(dtSeconds, vehicle, heading)
     if self.shot == nil then
         -- First frame after activation: the activation blend already eases in.
         self.shot = wanted
+        self.shotSide = self.director.side
     elseif wanted ~= self.shot then
         -- Freeze wherever the camera is aiming right now, part-way through an
-        -- earlier blend included, so a quick second change never jumps.
+        -- earlier blend included, so a quick second change never jumps. The
+        -- director has already picked the next angle's side by now, so the
+        -- outgoing angle is framed with the side it was actually shot from.
         self.fromPose = self:getCurrentPose(vehicle)
         self.shotBlendElapsed = 0
         self.blendBearingDiff = nil
         self.shot = wanted
+        self.shotSide = self.director.side
 
         if wanted == DroneCamSettings.MODE_ORBIT then
             -- Start circling from the camera's current bearing rather than
@@ -463,20 +737,28 @@ end
 ---@return number, number, number @Desired look target
 ---@return number|nil, number|nil @Yaw and pitch override
 ---@return number @How much of the override to apply, 0..1
+---@return number, number @Tracking 0..1 and terrain clearance, see getShotTracking
 function DroneCamCamera:getShotTransform(vehicle)
     if self.fromPose == nil then
         local px, py, pz, lx, ly, lz, yaw, pitch = self:getModeTransform(vehicle, self.shot)
-        return px, py, pz, lx, ly, lz, yaw, pitch, yaw ~= nil and 1 or 0
+        local tracking, clearance = self:getShotTracking(self.shot)
+        return px, py, pz, lx, ly, lz, yaw, pitch, yaw ~= nil and 1 or 0, tracking, clearance
     end
 
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
     local pose = self:getCurrentPose(vehicle)
+    local heading = self.vehicleHeading
+    local fwdX, fwdZ = math.sin(heading), math.cos(heading)
+    local bearing = pose.bearing + heading
 
-    return vx + math.sin(pose.bearing) * pose.radius,
+    return vx + math.sin(bearing) * pose.radius,
            vy + pose.height,
-           vz + math.cos(pose.bearing) * pose.radius,
-           vx + pose.lookX, vy + pose.lookY, vz + pose.lookZ,
-           pose.yaw, pose.pitch, pose.overrideWeight
+           vz + math.cos(bearing) * pose.radius,
+           vx + fwdZ * pose.lookAcross + fwdX * pose.lookAlong,
+           vy + pose.lookY,
+           vz - fwdX * pose.lookAcross + fwdZ * pose.lookAlong,
+           pose.yaw ~= nil and pose.yaw + heading or nil, pose.pitch, pose.overrideWeight,
+           pose.tracking, pose.clearance
 end
 
 ---Raises the camera while the line from the aim point to the camera is blocked
@@ -513,6 +795,75 @@ function DroneCamCamera:updateObstacleClearance(dtSeconds)
     end
 end
 
+---No vehicle reaches this high, so above it the rig is not even measured.
+DroneCamCamera.VEHICLE_CHECK_HEIGHT = 10
+
+---@return table|nil @The rig, if the position is low enough for it to matter
+function DroneCamCamera:getRigNear(vehicle, x, y, z)
+    if y - getTerrainHeightAt(x, z) > DroneCamCamera.VEHICLE_CHECK_HEIGHT then
+        return nil
+    end
+    return self:getRig(vehicle)
+end
+
+---Raises a desired position over standing crop. The crop is sampled a little
+---around the position and the floor it gives is rate limited, so the camera
+---climbs on the approach to taller crop instead of jumping at its edge.
+---@return number @Adjusted height
+function DroneCamCamera:applyCropFloor(dtSeconds, x, y, z)
+    local ground = getTerrainHeightAt(x, z)
+    local target = 0
+
+    if y - ground < DroneCamCamera.CROP_CHECK_HEIGHT then
+        target = getCropHeightAround(x, z)
+    end
+
+    if target > self.cropFloor then
+        self.cropFloor = math.min(target, self.cropFloor + DroneCamCamera.CROP_RISE_SPEED * dtSeconds)
+    else
+        self.cropFloor = math.max(target, self.cropFloor - DroneCamCamera.CROP_FALL_SPEED * dtSeconds)
+    end
+
+    if self.cropFloor > 0 then
+        y = math.max(y, ground + self.cropFloor + DroneCamCamera.CROP_MARGIN)
+    end
+
+    return y
+end
+
+---Last line of defence, applied to where the camera actually is after
+---smoothing: never into the ground, the crop or the vehicle. The floors on the
+---desired position normally keep the camera well clear of these, so this only
+---bites if smoothing lag or a sudden manoeuvre would otherwise carry it in.
+---
+---The vehicle floor used here is the eased one, so a camera drifting towards
+---the vehicle is lifted progressively over the last metre or so, never
+---snapped up in a single frame.
+function DroneCamCamera:applyHardFloors(vehicle)
+    local ground = getTerrainHeightAt(self.posX, self.posZ)
+    self.posY = math.max(self.posY, ground + DroneCamCamera.HARD_GROUND_CLEARANCE)
+
+    local rig = self:getRigNear(vehicle, self.posX, self.posY, self.posZ)
+
+    if not self.floorsArmed then
+        if rig == nil or not DroneCamRig.getIsInsideVehicle(rig, self.posX, self.posY, self.posZ, true) then
+            self.floorsArmed = true
+        end
+        return
+    end
+
+    if self.posY - ground < DroneCamCamera.CROP_CHECK_HEIGHT then
+        local crop = DroneCamCamera.getCropHeightAt(self.posX, self.posZ)
+        if crop > 0 then
+            self.posY = math.max(self.posY, ground + crop + DroneCamCamera.CROP_HARD_MARGIN)
+        end
+    end
+
+    if rig ~= nil then
+        self.posY = math.max(self.posY, DroneCamRig.getVehicleFloor(rig, self.posX, self.posZ, true))
+    end
+end
+
 ---Advances the shot by one frame.
 ---@param dt number @Frame time in milliseconds
 ---@param vehicle table @Vehicle being filmed
@@ -537,7 +888,13 @@ function DroneCamCamera:update(dt, vehicle)
         targetHeading = math.atan2(dirX, dirZ)
         self.heading = self.heading
             + normaliseAngleDiff(targetHeading - self.heading) * smoothingAlpha(dtSeconds, settings.headingStiffness)
+        -- Close-ups are framed on the real heading: a camera beside a wheel
+        -- cannot lag the way a drone 40m back can.
+        self.vehicleHeading = targetHeading
     end
+
+    self.vehicle = vehicle
+    self.rig = nil
 
     self.orbitAngle = self.orbitAngle + math.rad(settings.orbitSpeed) * dtSeconds
 
@@ -546,6 +903,7 @@ function DroneCamCamera:update(dt, vehicle)
     local desiredLookX, desiredLookY, desiredLookZ
     local yawOverride, pitchOverride
     local overrideWeight = 0
+    local tracking, clearance = 0, settings.minClearance
 
     if isBlendingOut then
         self.blendTime = self.blendTime + dtSeconds
@@ -567,7 +925,7 @@ function DroneCamCamera:update(dt, vehicle)
 
         desiredPosX, desiredPosY, desiredPosZ,
         desiredLookX, desiredLookY, desiredLookZ,
-        yawOverride, pitchOverride, overrideWeight = self:getShotTransform(vehicle)
+        yawOverride, pitchOverride, overrideWeight, tracking, clearance = self:getShotTransform(vehicle)
 
         local swayX, swayY, swayZ = self:getSwayOffset()
         desiredPosX = desiredPosX + swayX
@@ -576,12 +934,37 @@ function DroneCamCamera:update(dt, vehicle)
 
         desiredPosY = desiredPosY + self.heightBoost
 
-        -- Never below the terrain plus the configured clearance.
-        local minY = getTerrainHeightAround(desiredPosX, desiredPosZ) + settings.minClearance
+        -- Never below the terrain plus the clearance for this angle.
+        local step = lerp(DroneCamCamera.TERRAIN_SAMPLE_STEP, DroneCamCamera.CLOSEUP_TERRAIN_SAMPLE_STEP, tracking)
+        local minY = getTerrainHeightAround(desiredPosX, desiredPosZ, step) + clearance
         if desiredPosY < minY then
             desiredPosY = minY
         end
+
+        desiredPosY = self:applyCropFloor(dtSeconds, desiredPosX, desiredPosY, desiredPosZ)
+
+        -- Rise over the vehicle and its implements rather than through them.
+        -- The soft floor eases in short of the footprint, so a blend that
+        -- passes close lifts in an arc.
+        local rig = self:getRigNear(vehicle, desiredPosX, desiredPosY, desiredPosZ)
+        if rig ~= nil then
+            desiredPosY = math.max(desiredPosY, DroneCamRig.getVehicleFloor(rig, desiredPosX, desiredPosZ, true))
+        end
     end
+
+    -- Close-ups ride along with the vehicle: move the camera by however far the
+    -- vehicle moved before smoothing, so the smoothing only softens changes of
+    -- framing and never leaves the shot trailing metres behind.
+    local vehicleX, vehicleY, vehicleZ = getWorldTranslation(vehicle.rootNode)
+    if not isBlendingOut and tracking > 0 and self.lastVehicleX ~= nil then
+        local moveX = (vehicleX - self.lastVehicleX) * tracking
+        local moveY = (vehicleY - self.lastVehicleY) * tracking
+        local moveZ = (vehicleZ - self.lastVehicleZ) * tracking
+
+        self.posX, self.posY, self.posZ = self.posX + moveX, self.posY + moveY, self.posZ + moveZ
+        self.lookX, self.lookY, self.lookZ = self.lookX + moveX, self.lookY + moveY, self.lookZ + moveZ
+    end
+    self.lastVehicleX, self.lastVehicleY, self.lastVehicleZ = vehicleX, vehicleY, vehicleZ
 
     -- Ease the position stiffness in over the blend window so activation and
     -- hand-off start gently instead of lurching.
@@ -602,6 +985,7 @@ function DroneCamCamera:update(dt, vehicle)
 
     if not isBlendingOut then
         self:updateObstacleClearance(dtSeconds)
+        self:applyHardFloors(vehicle)
     end
 
     setWorldTranslation(self.cameraNode, self.posX, self.posY, self.posZ)
@@ -619,11 +1003,19 @@ function DroneCamCamera:update(dt, vehicle)
         local invLength = 1 / length
         rotX = math.asin(math.min(math.max(dy * invLength, -1), 1))
         rotY = math.atan2(-dx * invLength, -dz * invLength)
+
+        -- Looking almost straight down, the heading of the view is set by a
+        -- horizontal offset of a few centimetres and can swing half a turn in
+        -- a frame. Trust it less the closer to vertical the view is, holding
+        -- the previous heading instead.
+        if self.lastRotY ~= nil then
+            local trust = math.min(math.sqrt(dx * dx + dz * dz) * invLength / DroneCamCamera.YAW_TRUST_TILT, 1)
+            rotY = self.lastRotY + normaliseAngleDiff(rotY - self.lastRotY) * trust * trust
+        end
     end
 
     -- Top-down fixes its rotation outright. While blending to or from it, ease
-    -- between that and the aimed rotation; the aimed yaw is unstable straight
-    -- overhead, but its weight has reached zero by the time the camera is there.
+    -- between that and the aimed rotation.
     if pitchOverride ~= nil and yawOverride ~= nil and overrideWeight > 0 then
         if overrideWeight >= 1 then
             rotX, rotY = pitchOverride, yawOverride
@@ -633,6 +1025,16 @@ function DroneCamCamera:update(dt, vehicle)
         end
     end
 
+    -- Some changes of angle need the view to turn right round, such as top-down
+    -- (facing forward) to the front close-up (facing back). Cap the turn rate
+    -- so that happens as a steady pan across the blend, not a whip.
+    if self.lastRotY ~= nil and not isBlendingOut then
+        local maxTurn = DroneCamCamera.MAX_YAW_RATE * dtSeconds
+        local turn = normaliseAngleDiff(rotY - self.lastRotY)
+        rotY = self.lastRotY + math.min(math.max(turn, -maxTurn), maxTurn)
+    end
+
+    self.lastRotY = rotY
     setWorldRotation(self.cameraNode, rotX, rotY, 0)
 
     if isBlendingOut then

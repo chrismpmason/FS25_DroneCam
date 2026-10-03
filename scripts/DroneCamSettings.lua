@@ -12,6 +12,14 @@ DroneCamSettings.MODE_AUTO = 4
 DroneCamSettings.MODE_FIRST = 1
 DroneCamSettings.MODE_LAST = 4
 
+---Close-up angles. These are not modes: only the Auto director uses them, so
+---they sit outside the MODE_FIRST..MODE_LAST range that Ctrl+C cycles through.
+DroneCamSettings.SHOT_WHEEL = 5
+DroneCamSettings.SHOT_IMPLEMENT = 6
+DroneCamSettings.SHOT_SIDE = 7
+DroneCamSettings.SHOT_FRONT = 8
+DroneCamSettings.SHOT_REAR_QUARTER = 9
+
 DroneCamSettings.MODE_L10N = {
     [DroneCamSettings.MODE_CHASE] = "droneCam_mode_chase",
     [DroneCamSettings.MODE_TOPDOWN] = "droneCam_mode_topDown",
@@ -47,6 +55,9 @@ DroneCamSettings.SCHEMA = {
     { "shotBlendTime",   "float", 2,     0,   10 },
     { "directorMinShot", "float", 10,    3,   120 },
     { "directorMaxShot", "float", 15,    3,   120 },
+    { "closeUps",        "bool",  true },
+    { "closeUpMinShot",  "float", 6,     2,   60 },
+    { "closeUpMaxShot",  "float", 10,    2,   60 },
     { "followAI",        "bool",  false },
     { "sway",            "bool",  true },
     { "swayAmplitude",   "float", 0.4,   0,   3 },

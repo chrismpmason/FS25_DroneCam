@@ -5,9 +5,15 @@ while the vehicle you are controlling is working a field, and hands back to the
 normal vehicle camera when work stops.
 
 Three angles — **Chase**, **Top-down** and **Orbit** — plus an **Auto director**
-mode that cuts between them at random every 10–15 seconds, never repeating an
-angle and never changing during a headland turn. Every change of angle is a
-two-second blend that swings round the vehicle rather than a hard cut. All of it
+mode that mixes them with five close-ups (wheel, implement, side tracking, front
+low and rear quarter), roughly alternating wide and close. Wide angles are held
+10–15 seconds and close-ups 6–10, no angle repeats twice in a row, nothing
+changes during a headland turn, and a close-up gives way to a wide angle as soon
+as a turn begins. Close-ups are placed and scaled from the measured vehicle and
+implements, so they suit a compact tractor and a combine alike, and they are
+kept out of the ground, the vehicle and standing crop. Every change of angle is
+a two-second blend that swings round (and if need be over) the vehicle rather
+than a hard cut. All of it
 has framerate-independent smoothing, terrain clamping and an obstacle raycast
 that lifts the shot clear of trees and buildings. No events are sent and nothing is synchronised, so it is
 safe in multiplayer and does nothing on a dedicated server.
@@ -36,6 +42,7 @@ l10n/l10n_en.xml
 scripts/DroneCam.lua             manager: state machine and input
 scripts/DroneCamCamera.lua       camera node, smoothing, angles and blends
 scripts/DroneCamDirector.lua     Auto director: shot timing, choice, turn hold
+scripts/DroneCamRig.lua          vehicle + implement measurement, vehicle floor
 scripts/DroneCamWorkDetect.lua   field-work detection and hysteresis
 scripts/DroneCamSettings.lua     defaults and XML persistence
 test/test_dronecam.lua           offline test suite
@@ -49,7 +56,10 @@ tools/make_icon.py               regenerates icon_DroneCam.dds
 `test/test_dronecam.lua` stubs the engine and game globals the mod touches, then
 drives it through a simulated work session. It covers engage/disengage timing,
 framing and aim, the terrain clamp, obstacle avoidance, all three angles, the
-Auto director (hold times, no repeats, headland hold, no hard cuts), combine
+Auto director (hold times, no repeats, headland hold, no hard cuts), close-up
+placement and scaling on a small tractor, a mid tractor with a cultivator and a
+combine with a 9m header, ground/vehicle/crop clearance checked every frame of
+long simulated flights, combine
 and hired-helper detection, settings round-tripping, and every path that must
 return the player to their own camera.
 

@@ -88,6 +88,13 @@ function RaycastUtil.raycastClosest(x, y, z, dx, dy, dz, maxDistance, mask)
     return nil
 end
 
+-- Crop: CROP_AT(x, z) returns fruit type index and growth state, 0 for bare
+-- ground. Fruit type 1 is maize, harvest-ready from growth state 5.
+CROP_AT = function() return 0, 0 end
+FSDensityMapUtil = { getFruitTypeIndexAtWorldPos = function(x, z) return CROP_AT(x, z) end }
+local MAIZE = { name = "MAIZE", minHarvestingGrowthState = 5, maxHarvestingGrowthState = 6, cutState = 8 }
+g_fruitTypeManager = { getFruitTypeByIndex = function(self, index) if index == 1 then return MAIZE end end }
+
 CollisionFlag = { STATIC_OBJECT = 1, BUILDING = 2, TREE = 4, VEHICLE = 8, TERRAIN = 16 }
 GS_PRIO_LOW = 1
 FSBaseMission = { INGAME_NOTIFICATION_INFO = { 1, 1, 1, 1 } }
@@ -155,6 +162,7 @@ function addModEventListener(l) listeners[#listeners + 1] = l end
 
 dofile(MOD .. "/scripts/DroneCamSettings.lua")
 dofile(MOD .. "/scripts/DroneCamWorkDetect.lua")
+dofile(MOD .. "/scripts/DroneCamRig.lua")
 dofile(MOD .. "/scripts/DroneCamDirector.lua")
 dofile(MOD .. "/scripts/DroneCamCamera.lua")
 dofile(MOD .. "/scripts/DroneCam.lua")
@@ -215,8 +223,23 @@ local function tick(seconds, working, headingRate, onStep)
             nodes[vehicleCamNode].z = nodes[vehicle.rootNode].z
             nodes[vehicleCamNode].ry = heading + math.pi
 
+            -- Carry wheels, implements and work area nodes along rigidly.
+            local root = nodes[vehicle.rootNode]
+            for _, part in ipairs(vehicle.attached or {}) do
+                local n = nodes[part.node]
+                n.x = root.x + math.cos(heading) * part.across + math.sin(heading) * part.along
+                n.z = root.z - math.sin(heading) * part.across + math.cos(heading) * part.along
+                n.y = root.y + part.up
+                n.ry = heading
+            end
+
             if working then
-                vehicle.spec_workArea.workAreas[1].lastProcessingTime = g_currentMission.time
+                for _, child in ipairs(vehicle:getChildVehicles()) do
+                    local spec = child.spec_workArea
+                    for _, workArea in ipairs(spec and spec.workAreas or {}) do
+                        workArea.lastProcessingTime = g_currentMission.time
+                    end
+                end
             end
         end
 
@@ -474,7 +497,7 @@ end
 -- Per-frame limits for "no hard cuts", at 16ms frames. The vehicle itself
 -- moves 0.13m a frame; a cut between angles is a 40-80m or 45-90 degree jump.
 local MAX_STEP = 2.5
-local MAX_TURN = 4
+local MAX_TURN = 3
 
 local CHASE = DroneCamSettings.MODE_CHASE
 local TOPDOWN = DroneCamSettings.MODE_TOPDOWN
@@ -503,35 +526,73 @@ local director = DroneCamDirector.new(DroneCam.settings)
 director.random = makeRng(12345)
 director:start(CHASE, 0)
 
-local switches, repeats = 0, 0
-local seen = {}
-local held, minHeld, maxHeld = 0, math.huge, 0
-local lastShot = director.shot
-for _ = 1, 40000 do -- 2000 simulated seconds, driving dead straight
-    held = held + 0.05
-    local previousTime = director.shotTime
-    local shot = director:update(0.05, 0)
-    if director.shotTime < previousTime then
-        switches = switches + 1
-        if shot == lastShot then repeats = repeats + 1 end
-        minHeld, maxHeld = math.min(minHeld, held), math.max(maxHeld, held)
-        seen[shot] = true
-        held = 0
+local isClose = DroneCamDirector.getIsCloseUp
+local CLOSE_SHOTS = DroneCamDirector.CLOSE_SHOTS
+
+---Runs a director dead straight for a long time and gathers statistics.
+local function survey(d, seconds)
+    local stats = { switches = 0, repeats = 0, seen = {}, groupChanges = 0, sides = {},
+                    wide = { min = math.huge, max = 0 }, close = { min = math.huge, max = 0 } }
+    local held = 0
+    local lastShot = d.shot
+    for _ = 1, math.floor(seconds / 0.05) do
+        held = held + 0.05
+        local previousTime = d.shotTime
+        local shot = d:update(0.05, 0)
+        if d.shotTime < previousTime then
+            stats.switches = stats.switches + 1
+            if shot == lastShot then stats.repeats = stats.repeats + 1 end
+            if isClose(shot) ~= isClose(lastShot) then stats.groupChanges = stats.groupChanges + 1 end
+            local group = isClose(lastShot) and stats.close or stats.wide
+            group.min, group.max = math.min(group.min, held), math.max(group.max, held)
+            stats.seen[shot] = true
+            stats.sides[d.side] = true
+            held = 0
+        end
+        lastShot = shot
     end
-    lastShot = shot
+    return stats
 end
-check("switches angle regularly", switches > 120, tostring(switches))
-check("never repeats the same angle twice in a row", repeats == 0, tostring(repeats))
-check("uses chase, top-down and orbit", seen[CHASE] and seen[TOPDOWN] and seen[ORBIT])
-check("holds each angle at least 10s", minHeld >= 10 - 1e-6, ("min=%.2f"):format(minHeld))
-check("holds each angle at most 15s", maxHeld <= 15 + 0.05 + 1e-6, ("max=%.2f"):format(maxHeld))
-check("hold times spread across 10-15s", minHeld < 10.5 and maxHeld > 14.5,
-      ("min=%.2f max=%.2f"):format(minHeld, maxHeld))
+
+local stats = survey(director, 3000)
+check("switches angle regularly", stats.switches > 250, tostring(stats.switches))
+check("never repeats the same angle twice in a row", stats.repeats == 0, tostring(stats.repeats))
+check("uses chase, top-down and orbit", stats.seen[CHASE] and stats.seen[TOPDOWN] and stats.seen[ORBIT])
+local allClose = true
+for _, shot in ipairs(CLOSE_SHOTS) do allClose = allClose and stats.seen[shot] == true end
+check("uses all five close-ups", allClose)
+check("close-ups are filmed from both sides", stats.sides[1] and stats.sides[-1])
+check("wide angles held 10-15s", stats.wide.min >= 10 - 1e-6 and stats.wide.max <= 15.05 + 1e-6,
+      ("%.2f-%.2f"):format(stats.wide.min, stats.wide.max))
+check("close-ups held 6-10s", stats.close.min >= 6 - 1e-6 and stats.close.max <= 10.05 + 1e-6,
+      ("%.2f-%.2f"):format(stats.close.min, stats.close.max))
+check("hold times spread across their ranges",
+      stats.wide.min < 10.5 and stats.wide.max > 14.5 and stats.close.min < 6.5 and stats.close.max > 9.5)
+local alternation = stats.groupChanges / stats.switches
+check("roughly alternates wide and close (65-85% of cuts change group)",
+      alternation > 0.65 and alternation < 0.85, ("%.0f%%"):format(alternation * 100))
+
+local noImplement = DroneCamDirector.new(DroneCam.settings)
+noImplement.random = makeRng(555)
+noImplement.isShotAvailable = function(shot) return shot ~= DroneCamSettings.SHOT_IMPLEMENT end
+noImplement:start(CHASE, 0)
+check("skips the implement shot when there is no implement",
+      not survey(noImplement, 1500).seen[DroneCamSettings.SHOT_IMPLEMENT])
+
+DroneCam.settings.closeUps = false
+local wideOnly = DroneCamDirector.new(DroneCam.settings)
+wideOnly.random = makeRng(31)
+wideOnly:start(CHASE, 0)
+local wideStats = survey(wideOnly, 1500)
+local anyClose = false
+for _, shot in ipairs(CLOSE_SHOTS) do anyClose = anyClose or wideStats.seen[shot] == true end
+check("close-ups can be switched off", not anyClose and wideStats.repeats == 0)
+DroneCam.settings.closeUps = true
 
 local fresh = DroneCamDirector.new(DroneCam.settings)
 fresh.random = makeRng(99)
 fresh:start(nil, 0)
-check("starts on a random angle when none is on screen",
+check("opens on a wide establishing angle when none is on screen",
       fresh.shot == CHASE or fresh.shot == TOPDOWN or fresh.shot == ORBIT, tostring(fresh.shot))
 fresh:start(DroneCamSettings.MODE_AUTO, 0)
 check("never opens on auto itself", fresh.shot ~= DroneCamSettings.MODE_AUTO)
@@ -581,6 +642,24 @@ local _, wobbleSwitch = runDirector(wobbler, 14, function(t2) return math.rad(1.
 check("ordinary steering corrections do not hold the cut", wobbleSwitch ~= nil and wobbleSwitch < 11,
       ("switched at %s"):format(tostring(wobbleSwitch)))
 
+local escaper = DroneCamDirector.new(DroneCam.settings)
+escaper.random = makeRng(808)
+escaper:start(CHASE, 0)
+escaper:cutTo(DroneCamSettings.SHOT_WHEEL)
+local te = runDirector(escaper, 2, function() return 0 end, 0)
+check("close-up holds on the straight", escaper.shot == DroneCamSettings.SHOT_WHEEL)
+local escapedAt, closeAgain = nil, false
+local headlandStart = te
+for _ = 1, math.floor(6 / dt) do
+    te = te + dt
+    escaper:update(dt, (te - headlandStart) * math.rad(30))
+    if escapedAt == nil and not isClose(escaper.shot) then escapedAt = te end
+    if escapedAt ~= nil and isClose(escaper.shot) then closeAgain = true end
+end
+check("a turn sends a close-up to a wide angle within a second",
+      escapedAt ~= nil and escapedAt - headlandStart < 1, ("after %.2fs"):format((escapedAt or 99) - headlandStart))
+check("no close-up for the rest of the turn", not closeAgain)
+
 print("\n-- auto director: in flight --")
 tick(12, false)
 DroneCam.settings.mode = AUTO
@@ -609,7 +688,7 @@ local maxStep, maxTurn = measureMotion(75, true, 0, function(dtSeconds)
     end
 end)
 print(("        75s: %d changes, worst frame %.2fm / %.2f deg"):format(changes, maxStep, maxTurn))
-check("changes angle several times in 75s", changes >= 4 and changes <= 8, tostring(changes))
+check("changes angle several times in 75s", changes >= 5 and changes <= 12, tostring(changes))
 check("no hard cut in position", maxStep < MAX_STEP, ("%.2fm in one frame"):format(maxStep))
 check("no hard cut in rotation", maxTurn < MAX_TURN, ("%.2f deg in one frame"):format(maxTurn))
 local blendOk = #blendLengths >= 4
@@ -619,6 +698,8 @@ end
 check("each change blends over about 2 seconds", blendOk, table.concat(blendLengths, ", "))
 
 print("\n-- auto director: no change during a headland in flight --")
+-- Start from a wide angle: a close-up would rightly give way as the turn begins.
+if isClose(camera.director.shot) then camera.director:cutTo(CHASE) end
 tick(4, true) -- let any blend in progress finish
 camera.director.shotTime = camera.director.shotLength - 0.5
 local shotBeforeTurn = camera.shot
@@ -690,6 +771,319 @@ check("sanity: without blending the change is a hard cut", cutTurn > MAX_TURN * 
 DroneCam.settings.shotBlendTime = 2
 DroneCam.settings.mode = CHASE
 tick(12, false)
+
+------------------------------------------------------------------ close-ups
+
+local WHEEL = DroneCamSettings.SHOT_WHEEL
+local IMPLEMENT = DroneCamSettings.SHOT_IMPLEMENT
+local SIDE = DroneCamSettings.SHOT_SIDE
+local FRONT = DroneCamSettings.SHOT_FRONT
+local REAR_QUARTER = DroneCamSettings.SHOT_REAR_QUARTER
+
+---Builds a vehicle combination: a root vehicle with wheels and any number of
+---implements, each with one work area. Offsets are from the root vehicle:
+---across (its local +X), up, along (forward).
+local function makeRig(spec)
+    local v = makeVehicle()
+    v.size = { width = spec.width, length = spec.length, height = spec.height }
+    v.spec_workArea = { workAreas = {} }
+    v.attached = {}
+    local function attach(node, across, up, along)
+        v.attached[#v.attached + 1] = { node = node, across = across, up = up, along = along }
+    end
+
+    v.spec_wheels = { wheels = {} }
+    for _, w in ipairs(spec.wheels) do
+        for _, s in ipairs({ -1, 1 }) do
+            local node = newNode("wheel")
+            attach(node, s * w.across, w.radius, w.along)
+            v.spec_wheels.wheels[#v.spec_wheels.wheels + 1] = { driveNode = node, physics = { radius = w.radius } }
+        end
+    end
+
+    local children = { v }
+    for _, imp in ipairs(spec.implements or {}) do
+        local child = { rootNode = newNode("implement"), size = { width = imp.width, length = imp.length, height = imp.height } }
+        attach(child.rootNode, 0, 0, imp.along)
+        local half = imp.workWidth / 2
+        local front, back = imp.along + imp.workDepth / 2, imp.along - imp.workDepth / 2
+        local s, w, h = newNode("workStart"), newNode("workWidth"), newNode("workHeight")
+        attach(s, half, 0, front)
+        attach(w, -half, 0, front)
+        attach(h, half, 0, back)
+        child.spec_workArea = { workAreas = { { start = s, width = w, height = h, lastProcessingTime = -10000 } } }
+        function child:getIsWorkAreaProcessing(wa) return wa.lastProcessingTime + 200 >= g_currentMission.time end
+        children[#children + 1] = child
+    end
+    v.getChildVehicles = function() return children end
+
+    return v
+end
+
+local SMALL_TRACTOR = {
+    width = 2.0, length = 3.6, height = 2.5,
+    wheels = { { across = 0.8, along = -0.9, radius = 0.6 }, { across = 0.8, along = 1.0, radius = 0.4 } },
+    implements = { { along = -3.2, width = 2.5, length = 1.5, height = 1.1, workWidth = 2.5, workDepth = 1.0 } }
+}
+local TRACTOR = {
+    width = 2.6, length = 5, height = 3,
+    wheels = { { across = 1.0, along = -1.2, radius = 0.8 }, { across = 1.0, along = 1.5, radius = 0.55 } },
+    implements = { { along = -4.6, width = 4, length = 2.5, height = 1.4, workWidth = 4, workDepth = 1.6 } }
+}
+local COMBINE = {
+    width = 3.6, length = 9, height = 4,
+    wheels = { { across = 1.4, along = 1.6, radius = 0.95 }, { across = 1.3, along = -2.8, radius = 0.65 } },
+    implements = { { along = 5.6, width = 9, length = 2, height = 1.5, workWidth = 9, workDepth = 1.5 } }
+}
+
+local plainVehicle = vehicle
+
+---Puts the player in a new vehicle and lands any drone that was flying.
+local function driveVehicle(v)
+    vehicle = v
+    tick(12, false)
+end
+
+---Where a close-up puts the camera for the current vehicle, in its frame.
+local function shotGeometry(shot, side)
+    camera.vehicle = vehicle
+    camera.rig = nil
+    camera.vehicleHeading = heading
+    camera.shotSide = side
+    local px, py, pz, lx, ly, lz = camera:getCloseUpTransform(vehicle, shot)
+    local rig = camera:getRig(vehicle)
+    local across, along = DroneCamRig.toLocal(rig, px, pz)
+    local lookAcross, lookAlong = DroneCamRig.toLocal(rig, lx, lz)
+    return {
+        rig = rig, across = across, along = along, height = py - rig.ground,
+        lookAcross = lookAcross, lookAlong = lookAlong, lookHeight = ly - rig.ground,
+        clear = DroneCamRig.getVehicleFloor(rig, px, pz, true) <= py,
+        distance = math.sqrt(across * across + along * along)
+    }
+end
+
+local ALL_CLOSE = { WHEEL, IMPLEMENT, SIDE, FRONT, REAR_QUARTER }
+local SHOT_NAMES = { [WHEEL] = "wheel", [IMPLEMENT] = "implement", [SIDE] = "side",
+                     [FRONT] = "front", [REAR_QUARTER] = "rear quarter" }
+
+print("\n-- close-ups: placement on a tractor with a cultivator --")
+driveVehicle(makeRig(TRACTOR))
+local rigNow = DroneCamRig.measure(vehicle, heading)
+check("rig sees the tractor and the implement", #rigNow.boxes == 2 and rigNow.rear < -5)
+check("rig finds the worked strip behind", rigNow.work ~= nil and not rigNow.work.isFront
+      and math.abs(rigNow.work.halfWidth - 2) < 0.01, rigNow.work and rigNow.work.halfWidth)
+
+for _, side in ipairs({ 1, -1 }) do
+    for _, shot in ipairs(ALL_CLOSE) do
+        local g = shotGeometry(shot, side)
+        check(("%s (side %d) is clear of the tractor and implement"):format(SHOT_NAMES[shot], side), g.clear)
+    end
+end
+
+local g = shotGeometry(WHEEL, 1)
+local rearWheel = DroneCamRig.getRearWheel(g.rig, 1)
+check("wheel cam is low", g.height < 1.5, ("%.2fm"):format(g.height))
+check("wheel cam sits beside the rear wheel", g.across > 0 and math.abs(g.along - rearWheel.lz) < 2
+      and math.abs(g.across - rearWheel.lx) < 4, ("across %.2f along %.2f"):format(g.across, g.along))
+check("wheel cam looks at the rear wheel", math.abs(g.lookAlong - rearWheel.lz) < 0.01
+      and math.abs(g.lookAcross - rearWheel.lx) < 0.01)
+check("wheel cam on the other side mirrors it", shotGeometry(WHEEL, -1).across < 0)
+
+g = shotGeometry(IMPLEMENT, 1)
+check("implement cam is behind the implement", g.along < g.rig.rear, ("%.2f vs %.2f"):format(g.along, g.rig.rear))
+check("implement cam is low", g.height < 3, ("%.2fm"):format(g.height))
+check("implement cam looks at the worked soil", g.lookHeight < 0.5 and g.lookAlong < g.along + 4
+      and g.lookAlong > g.along)
+
+g = shotGeometry(SIDE, 1)
+check("side tracking is about 8m out from the side", math.abs(g.across - g.rig.halfWidth - 8 * g.rig.scale) < 0.01
+      and g.rig.scale > 0.9 and g.rig.scale < 1.2, ("%.2f out at scale %.2f"):format(g.across - g.rig.halfWidth, g.rig.scale))
+check("side tracking is about 3m up", math.abs(g.height - 3 * g.rig.scale) < 0.01, ("%.2fm"):format(g.height))
+
+g = shotGeometry(FRONT, 1)
+check("front low is ahead of the tractor", g.along > g.rig.front + 5, ("%.2f"):format(g.along))
+check("front low is low", g.height < 2, ("%.2fm"):format(g.height))
+check("front low looks back at the tractor", g.lookAlong < g.along - 5)
+
+g = shotGeometry(REAR_QUARTER, 1)
+check("rear quarter is behind the cab and out to the side", g.along < g.rig.rootRear and g.across > g.rig.halfWidth)
+check("rear quarter is at cab height", math.abs(g.height - 0.85 * g.rig.rootHeight) < 0.01, ("%.2fm"):format(g.height))
+
+print("\n-- close-ups: scale with the vehicle --")
+local tractorSide, tractorFront = shotGeometry(SIDE, 1), shotGeometry(FRONT, 1)
+local tractorWheel = shotGeometry(WHEEL, 1)
+driveVehicle(makeRig(SMALL_TRACTOR))
+local smallSide, smallFront = shotGeometry(SIDE, 1), shotGeometry(FRONT, 1)
+local smallWheel = shotGeometry(WHEEL, 1)
+local smallClear = true
+for _, shot in ipairs(ALL_CLOSE) do smallClear = smallClear and shotGeometry(shot, 1).clear and shotGeometry(shot, -1).clear end
+check("every close-up is clear of a small tractor", smallClear)
+driveVehicle(makeRig(COMBINE))
+local combineSide, combineFront = shotGeometry(SIDE, 1), shotGeometry(FRONT, 1)
+local combineWheel = shotGeometry(WHEEL, 1)
+local combineClear = true
+for _, shot in ipairs(ALL_CLOSE) do combineClear = combineClear and shotGeometry(shot, 1).clear and shotGeometry(shot, -1).clear end
+check("every close-up is clear of a combine with a 9m header", combineClear)
+print(("        scale: small %.2f, tractor %.2f, combine %.2f"):format(
+      smallSide.rig.scale, tractorSide.rig.scale, combineSide.rig.scale))
+check("scale grows with the vehicle", smallSide.rig.scale < tractorSide.rig.scale
+      and combineSide.rig.scale > 1.5 * smallSide.rig.scale)
+check("side tracking stands further off a combine",
+      combineSide.distance > 1.5 * smallSide.distance, ("%.1f vs %.1f"):format(combineSide.distance, smallSide.distance))
+check("front low stands further ahead of a combine",
+      combineFront.along - combineFront.rig.front > 1.5 * (smallFront.along - smallFront.rig.front))
+check("wheel cam keeps clear of a combine's bigger wheels", combineWheel.distance > smallWheel.distance)
+
+local header = shotGeometry(IMPLEMENT, 1)
+check("rig finds a combine header in front", header.rig.work ~= nil and header.rig.work.isFront)
+check("implement cam on a combine sits off the end of the header", header.across > header.rig.work.halfWidth
+      and math.abs(header.along - header.rig.work.lz) < 4, ("across %.1f along %.1f"):format(header.across, header.along))
+
+print("\n-- crop height --")
+CROP_AT = function() return 1, 5 end
+check("ripe maize is counted at full height", DroneCamCamera.getCropHeightAt(0, 0) == 3.2)
+CROP_AT = function() return 1, 2 end
+check("young maize is shorter", math.abs(DroneCamCamera.getCropHeightAt(0, 0) - 3.2 * 2 / 5) < 1e-9)
+CROP_AT = function() return 1, 8 end
+check("stubble does not count", DroneCamCamera.getCropHeightAt(0, 0) == 0)
+CROP_AT = function() return 0, 0 end
+check("bare ground does not count", DroneCamCamera.getCropHeightAt(0, 0) == 0)
+
+---Flies the director over the current vehicle, checking every frame that the
+---camera is out of the ground, the crop and the vehicle, and moves smoothly.
+local function flyAndCheck(seconds, headingRate, cropHeight)
+    local result = { inside = 0, underground = 0, inCrop = 0, maxStep = 0, maxTurn = 0, seen = {},
+                     lowest = math.huge, closeFrames = 0 }
+    local px, py, pz = getWorldTranslation(cn)
+    local prx, pry = nodes[cn].rx, nodes[cn].ry
+
+    tick(seconds, true, headingRate, function()
+        local x, y, z = getWorldTranslation(cn)
+        local rx, ry = nodes[cn].rx, nodes[cn].ry
+        result.maxStep = math.max(result.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
+        result.maxTurn = math.max(result.maxTurn, math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))
+        px, py, pz, prx, pry = x, y, z, rx, ry
+
+        if camera.floorsArmed then
+            local rigCheck = DroneCamRig.measure(vehicle, heading)
+            if y < DroneCamRig.getVehicleFloor(rigCheck, x, z, false) - 1e-6 then result.inside = result.inside + 1 end
+            if y < TERRAIN_HEIGHT + 0.5 then result.underground = result.underground + 1 end
+            if cropHeight ~= nil and y < TERRAIN_HEIGHT + cropHeight then result.inCrop = result.inCrop + 1 end
+        end
+
+        if camera.shot ~= nil then result.seen[camera.shot] = true end
+        if isClose(camera.shot) and camera.fromPose == nil then
+            result.closeFrames = result.closeFrames + 1
+            result.lowest = math.min(result.lowest, y - TERRAIN_HEIGHT)
+        end
+    end)
+
+    return result
+end
+
+local function allCloseSeen(seen)
+    for _, shot in ipairs(ALL_CLOSE) do
+        if not seen[shot] then return false end
+    end
+    return true
+end
+
+print("\n-- close-ups in flight: tractor with a cultivator --")
+driveVehicle(makeRig(TRACTOR))
+DroneCam.settings.mode = AUTO
+tick(3, true)
+camera.director.random = makeRng(4711)
+local flight = flyAndCheck(300, 0)
+print(("        300s: worst frame %.2fm / %.2f deg, lowest close-up %.2fm"):format(flight.maxStep, flight.maxTurn, flight.lowest))
+check("flies every close-up", allCloseSeen(flight.seen))
+check("and the wide angles", flight.seen[CHASE] and flight.seen[TOPDOWN] and flight.seen[ORBIT])
+check("never inside the tractor or implement", flight.inside == 0, flight.inside .. " frames")
+check("never into the ground", flight.underground == 0, flight.underground .. " frames")
+check("close-ups go well below the 8m minimum", flight.lowest < 2, ("%.2fm"):format(flight.lowest))
+check("smooth glide between every shot", flight.maxStep < MAX_STEP and flight.maxTurn < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(flight.maxStep, flight.maxTurn))
+
+print("\n-- close-ups track the vehicle --")
+camera.director:cutTo(WHEEL)
+camera.director.shotLength = 30
+tick(4, true)
+local trackedWorst = 0
+tick(5, true, 0, function()
+    local x, _, z = getWorldTranslation(cn)
+    local rigNow2 = DroneCamRig.measure(vehicle, heading)
+    local wheelNow = DroneCamRig.getRearWheel(rigNow2, camera.shotSide)
+    local wx, wz = DroneCamRig.toWorld(rigNow2, wheelNow.lx, wheelNow.lz)
+    trackedWorst = math.max(trackedWorst, math.sqrt((x - wx) ^ 2 + (z - wz) ^ 2))
+end)
+check("wheel cam stays beside the wheel at working speed", trackedWorst < 4.5, ("%.2fm away"):format(trackedWorst))
+
+print("\n-- safety net: a shot aimed into the vehicle --")
+-- Every real shot keeps clear, so prove the floors on their own: aim the
+-- wheel cam straight into the cab and check the camera rises over instead.
+local realCloseUp = camera.getCloseUpTransform
+camera.getCloseUpTransform = function(self, v, shot)
+    local _, _, _, lx, ly, lz = realCloseUp(self, v, shot)
+    local rx, ry, rz = getWorldTranslation(v.rootNode)
+    return rx, ry + 1, rz, lx, ly, lz, nil, nil
+end
+local net = flyAndCheck(5, 0)
+camera.getCloseUpTransform = nil
+local _, netY = getWorldTranslation(cn)
+check("camera never enters the vehicle, even when aimed into it", net.inside == 0, net.inside .. " frames")
+check("it rises over the cab instead", netY >= TERRAIN_HEIGHT + TRACTOR.height + DroneCamRig.HARD_MARGIN - 1e-6,
+      ("%.2fm"):format(netY))
+check("and rises smoothly", net.maxStep < MAX_STEP, ("%.2fm"):format(net.maxStep))
+camera.director:cutTo(CHASE)
+tick(4, true)
+
+print("\n-- close-ups in flight: a headland turn --")
+camera.director:cutTo(SIDE)
+camera.director.shotLength = 30
+tick(4, true)
+check("side tracking on screen before the turn", camera.shot == SIDE)
+local turnFlight = flyAndCheck(1.0, math.rad(40))
+check("turn starts: close-up gives way to a wide angle", not isClose(camera.director.shot))
+local restOfTurn = flyAndCheck(3.5, math.rad(40))
+local closeInTurn = false
+for _, shot in ipairs(ALL_CLOSE) do closeInTurn = closeInTurn or (restOfTurn.seen[shot] and shot ~= SIDE) end
+check("no new close-up during the turn", not closeInTurn)
+check("leaving the close-up in a turn is still smooth and clear",
+      math.max(turnFlight.maxStep, restOfTurn.maxStep) < MAX_STEP and math.max(turnFlight.maxTurn, restOfTurn.maxTurn) < MAX_TURN
+      and turnFlight.inside + restOfTurn.inside == 0,
+      ("%.2fm / %.2f deg, %d inside"):format(math.max(turnFlight.maxStep, restOfTurn.maxStep),
+          math.max(turnFlight.maxTurn, restOfTurn.maxTurn), turnFlight.inside + restOfTurn.inside))
+
+print("\n-- close-ups in flight: tractor with nothing attached --")
+local SOLO = { width = TRACTOR.width, length = TRACTOR.length, height = TRACTOR.height, wheels = TRACTOR.wheels }
+local solo = makeRig(SOLO)
+solo.spec_workArea = { workAreas = { { lastProcessingTime = -10000 } } } -- works, but has no work area nodes
+vehicle = solo
+tick(3, true)
+camera.director.random = makeRng(1234)
+local soloFlight = flyAndCheck(200, 0)
+check("no implement shot without an implement", not soloFlight.seen[IMPLEMENT])
+check("the other close-ups still fly", soloFlight.seen[WHEEL] and soloFlight.seen[SIDE]
+      and soloFlight.seen[FRONT] and soloFlight.seen[REAR_QUARTER])
+check("solo tractor: never inside, smooth", soloFlight.inside == 0 and soloFlight.maxStep < MAX_STEP
+      and soloFlight.maxTurn < MAX_TURN)
+
+print("\n-- close-ups in flight: combine in standing maize --")
+CROP_AT = function() return 1, 5 end
+driveVehicle(makeRig(COMBINE))
+tick(3, true)
+camera.director.random = makeRng(90210)
+local maize = flyAndCheck(300, 0, 3.2 + DroneCamCamera.CROP_HARD_MARGIN - 1e-6)
+print(("        300s: worst frame %.2fm / %.2f deg, lowest close-up %.2fm"):format(maize.maxStep, maize.maxTurn, maize.lowest))
+check("flies every close-up over a combine", allCloseSeen(maize.seen))
+check("never into the maize", maize.inCrop == 0, maize.inCrop .. " frames")
+check("never inside the combine or header", maize.inside == 0, maize.inside .. " frames")
+check("still lower than the wide angles", maize.lowest < 6, ("%.2fm"):format(maize.lowest))
+check("smooth over the maize", maize.maxStep < MAX_STEP and maize.maxTurn < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(maize.maxStep, maize.maxTurn))
+
+CROP_AT = function() return 0, 0 end
+DroneCam.settings.mode = CHASE
+driveVehicle(plainVehicle)
 
 print("\n-- settings round trip --")
 DroneCam.settings.chaseDistance = 55
