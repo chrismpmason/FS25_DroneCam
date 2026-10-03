@@ -15,11 +15,24 @@ that cuts between those, five close-ups and nine creator shots:
 - **Creator shots that travel:** push-in (from 150m out and high to the chase
   position), pull-out reveal, fly-over (front to back over the vehicle),
   rise-up (low behind, climbing to top-down) and slide (far off to the side).
+- **Hero shot: drive-over.** The camera sits 0.3m up on the ground 30–40m
+  ahead, centred between the wheels, and the vehicle drives over it. As it
+  passes the camera swings round in about 1.4 seconds to watch it go, then
+  rises into the chase position before anything towed behind can reach it.
+  It is only used on a straight run with no headland coming, at 7 km/h or
+  more, out of tall standing crop, not under trees, on level ground,
+  when raycasts against the vehicle's collision show at least 0.55m clear
+  underneath, and when anything towed leaves a clear gap of 2.5m or more,
+  empty all the way up on the centre line, with time to rise. In practice
+  that means self-propelled machines with clearance, a tractor on its own
+  (Ctrl+F), or trailed kit with a clear gap; most mounted implements leave
+  no way up, so the shot is skipped for them.
 
 Auto director has two styles, both on Ctrl+C. **Story** follows establishing →
 push-in → two or three close-ups → fly-over → pull-out reveal and round again,
 with stand-ins (long lens, field-edge pan, rise-up, slide, orbit) now and then
-so no two loops match. **Random** mixes everything, roughly alternating wide and
+so no two loops match, and the drive-over in place of the fly-over in about
+one loop in three when it can be done. **Random** mixes everything, roughly alternating wide and
 close. In both, wide and fixed shots hold 10–15 seconds, moving shots 7–10 and
 close-ups 6–10; nothing repeats twice in a row; the headland shot is taken as
 the row end comes up; nothing changes during a headland turn; and a close-up
@@ -90,7 +103,7 @@ l10n/l10n_en.xml
 scripts/DroneCam.lua             manager: state machine and input
 scripts/DroneCamCamera.lua       camera node, smoothing, angles and blends
 scripts/DroneCamDirector.lua     Auto director: story and random, timing, turn rules
-scripts/DroneCamCreator.lua      creator shots: spot planning, paths, zoom
+scripts/DroneCamCreator.lua      creator shots and drive-over: planning, paths, zoom
 scripts/DroneCamRig.lua          vehicle + implement measurement, vehicle floor
 scripts/DroneCamField.lua        field edges and extent
 scripts/DroneCamSpot.lua         fixed-spot checks: clear spot, line of sight
@@ -113,7 +126,9 @@ combine with a 9m header, ground/vehicle/crop clearance checked every frame of
 long simulated flights, the story sequence and its variety, every creator
 shot's spot or path, and story and random flights through a world with a
 hedge, a forest and a barn where every frame is checked for obstacles, sight
-of the vehicle, smoothness and zoom, combine
+of the vehicle, smoothness and zoom, the drive-over (every reason to skip it,
+then full runs over a tractor with a real collision underside and with
+trailed kit, checked every frame for distance to every collision body), combine
 and hired-helper detection, settings round-tripping, and every path that must
 return the player to their own camera.
 

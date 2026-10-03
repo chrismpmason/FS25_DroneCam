@@ -288,6 +288,17 @@ function DroneCamCamera:getIsBlendingOut()
     return self.blendOutActive == true
 end
 
+---Sets the camera's near clip distance if it has changed and the engine
+---offers a way to.
+function DroneCamCamera:setNearClip(distance)
+    if self.cameraNode == nil or self.appliedNearClip == distance or setNearClip == nil then
+        return
+    end
+
+    setNearClip(self.cameraNode, distance)
+    self.appliedNearClip = distance
+end
+
 ---Sets the camera's field of view, in degrees, if it has changed. Most shots
 ---use the configured value; the long lens and the fixed spots zoom in.
 function DroneCamCamera:setFov(fov)
@@ -310,6 +321,9 @@ local function getTerrainHeightAround(x, z, step)
 
     step = step or DroneCamCamera.TERRAIN_SAMPLE_STEP
     local height = getTerrainHeightAtWorldPos(terrainNode, x, 0, z)
+    if step <= 0 then
+        return height
+    end
 
     for offsetX = -step, step, step do
         for offsetZ = -step, step, step do
@@ -504,7 +518,7 @@ function DroneCamCamera:getIsShotStillUsable(shot)
             -- Chosen this frame and not taken up yet: its plan is in the cache.
             return self:getPlan(shot) ~= nil
         end
-        return self.plan ~= nil and self.plan.shot == shot and not self.plan.isLost
+        return self.plan ~= nil and self.plan.shot == shot and not self.plan.isLost and not self.plan.isDone
     end
 
     return true
@@ -1010,9 +1024,16 @@ end
 ---The vehicle floor used here is the eased one, so a camera drifting towards
 ---the vehicle is lifted progressively over the last metre or so, never
 ---snapped up in a single frame.
-function DroneCamCamera:applyHardFloors(vehicle)
+---@param isDriveOverLow boolean @On the ground for a drive-over: lower ground
+---    floor, no crop floor (the shot checked the crop), and the vehicle it goes
+---    under is left out of the vehicle floor (anything towed still counts)
+function DroneCamCamera:applyHardFloors(vehicle, isDriveOverLow)
     local ground = getTerrainHeightAt(self.posX, self.posZ)
-    self.posY = math.max(self.posY, ground + DroneCamCamera.HARD_GROUND_CLEARANCE)
+    local groundClearance = DroneCamCamera.HARD_GROUND_CLEARANCE
+    if isDriveOverLow then
+        groundClearance = DroneCamCreator.DRIVE_OVER_HEIGHT - 0.05
+    end
+    self.posY = math.max(self.posY, ground + groundClearance)
 
     local rig = self:getRigNear(vehicle, self.posX, self.posY, self.posZ)
 
@@ -1023,7 +1044,7 @@ function DroneCamCamera:applyHardFloors(vehicle)
         return
     end
 
-    if self.posY - ground < DroneCamCamera.CROP_CHECK_HEIGHT then
+    if not isDriveOverLow and self.posY - ground < DroneCamCamera.CROP_CHECK_HEIGHT then
         local crop = DroneCamCamera.getCropHeightAt(self.posX, self.posZ)
         if crop > 0 then
             self.posY = math.max(self.posY, ground + crop + DroneCamCamera.CROP_HARD_MARGIN)
@@ -1031,7 +1052,7 @@ function DroneCamCamera:applyHardFloors(vehicle)
     end
 
     if rig ~= nil then
-        self.posY = math.max(self.posY, DroneCamRig.getVehicleFloor(rig, self.posX, self.posZ, true))
+        self.posY = math.max(self.posY, DroneCamRig.getVehicleFloor(rig, self.posX, self.posZ, true, isDriveOverLow))
     end
 end
 
@@ -1082,6 +1103,7 @@ function DroneCamCamera:update(dt, vehicle)
     local yawOverride, pitchOverride
     local overrideWeight = 0
     local tracking, clearance = 0, settings.minClearance
+    local isDriveOverLow = false
 
     if isBlendingOut then
         self.blendTime = self.blendTime + dtSeconds
@@ -1100,33 +1122,47 @@ function DroneCamCamera:update(dt, vehicle)
         self.blendTime = math.min(self.blendTime + dtSeconds, math.max(settings.blendTime, 0.0001))
 
         self:updateShot(dtSeconds, vehicle, targetHeading)
+        DroneCamCreator.updateDriveOver(self, dtSeconds, vehicle)
+
+        -- On the ground for a drive-over the camera is placed to the
+        -- centimetre: no drift, no crop or vehicle floor for the vehicle it is
+        -- meant to go under (towed kit still counts), a single terrain sample.
+        isDriveOverLow = DroneCamCreator.getIsDriveOverLow(self)
 
         desiredPosX, desiredPosY, desiredPosZ,
         desiredLookX, desiredLookY, desiredLookZ,
         yawOverride, pitchOverride, overrideWeight, tracking, clearance, desiredFov = self:getShotTransform(vehicle)
 
-        local swayX, swayY, swayZ = self:getSwayOffset()
-        desiredPosX = desiredPosX + swayX
-        desiredPosY = desiredPosY + swayY
-        desiredPosZ = desiredPosZ + swayZ
+        local swayScale = DroneCamCreator.getSwayScale(self)
+        if swayScale > 0 then
+            local swayX, swayY, swayZ = self:getSwayOffset()
+            desiredPosX = desiredPosX + swayX * swayScale
+            desiredPosY = desiredPosY + swayY * swayScale
+            desiredPosZ = desiredPosZ + swayZ * swayScale
+        end
 
         desiredPosY = desiredPosY + self.heightBoost
 
         -- Never below the terrain plus the clearance for this angle.
         local step = lerp(DroneCamCamera.TERRAIN_SAMPLE_STEP, DroneCamCamera.CLOSEUP_TERRAIN_SAMPLE_STEP, tracking)
+        if isDriveOverLow then
+            step = 0
+        end
         local minY = getTerrainHeightAround(desiredPosX, desiredPosZ, step) + clearance
         if desiredPosY < minY then
             desiredPosY = minY
         end
 
-        desiredPosY = self:applyCropFloor(dtSeconds, desiredPosX, desiredPosY, desiredPosZ)
+        if not isDriveOverLow then
+            desiredPosY = self:applyCropFloor(dtSeconds, desiredPosX, desiredPosY, desiredPosZ)
+        end
 
         -- Rise over the vehicle and its implements rather than through them.
         -- The soft floor eases in short of the footprint, so a blend that
         -- passes close lifts in an arc.
         local rig = self:getRigNear(vehicle, desiredPosX, desiredPosY, desiredPosZ)
         if rig ~= nil then
-            desiredPosY = math.max(desiredPosY, DroneCamRig.getVehicleFloor(rig, desiredPosX, desiredPosZ, true))
+            desiredPosY = math.max(desiredPosY, DroneCamRig.getVehicleFloor(rig, desiredPosX, desiredPosZ, true, isDriveOverLow))
         end
     end
 
@@ -1152,6 +1188,13 @@ function DroneCamCamera:update(dt, vehicle)
     local posAlpha = smoothingAlpha(dtSeconds, settings.posStiffness * stiffnessScale)
     local lookAlpha = smoothingAlpha(dtSeconds, settings.lookStiffness)
 
+    -- Once the vehicle is about to pass over, the camera must be exactly where
+    -- the drive-over puts it: lag here would be lag into the vehicle or the
+    -- towed kit. Its path is already smooth.
+    if isDriveOverLow and self.plan.phase ~= "approach" then
+        posAlpha = 1
+    end
+
     self.posX = lerp(self.posX, desiredPosX, posAlpha)
     self.posY = lerp(self.posY, desiredPosY, posAlpha)
     self.posZ = lerp(self.posZ, desiredPosZ, posAlpha)
@@ -1162,13 +1205,17 @@ function DroneCamCamera:update(dt, vehicle)
 
     if not isBlendingOut then
         self:updateObstacleClearance(dtSeconds)
-        self:applyHardFloors(vehicle)
+        self:applyHardFloors(vehicle, isDriveOverLow)
         DroneCamCreator.updateSight(self.plan, dtSeconds, self.posX, self.posY, self.posZ, vehicle)
         self:setFov(desiredFov)
     elseif self.appliedFov ~= nil then
         -- Zoom back out to the normal field of view on the way home.
         self:setFov(lerp(self.appliedFov, settings.fov, posAlpha))
     end
+
+    -- Pull the near clip plane in while the camera is on the ground under a
+    -- vehicle, so the underside a few tens of centimetres away is not cut off.
+    self:setNearClip(isDriveOverLow and DroneCamCreator.DRIVE_OVER_NEAR_CLIP or DroneCamCamera.NEAR_CLIP)
 
     setWorldTranslation(self.cameraNode, self.posX, self.posY, self.posZ)
 
@@ -1211,12 +1258,18 @@ function DroneCamCamera:update(dt, vehicle)
     -- (facing forward) to the front close-up (facing back). Cap the turn rate
     -- so that happens as a steady pan across the blend, not a whip.
     if self.lastRotY ~= nil and not isBlendingOut then
-        local maxTurn = DroneCamCamera.MAX_YAW_RATE * dtSeconds
+        local maxRate = DroneCamCamera.MAX_YAW_RATE
+        if isDriveOverLow and self.plan.phase == "swing" then
+            -- The drive-over's swing is meant to be quick.
+            maxRate = DroneCamCreator.DRIVE_OVER_SWING_YAW_RATE
+        end
+        local maxTurn = maxRate * dtSeconds
         local turn = normaliseAngleDiff(rotY - self.lastRotY)
         rotY = self.lastRotY + math.min(math.max(turn, -maxTurn), maxTurn)
     end
 
     self.lastRotY = rotY
+    self.lastRotX = rotX
     setWorldRotation(self.cameraNode, rotX, rotY, 0)
 
     if isBlendingOut then

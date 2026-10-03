@@ -197,6 +197,7 @@ function DroneCamRig.measure(vehicle, heading)
             local box = getVehicleBox(child)
 
             if box ~= nil then
+                box.isRoot = child == vehicle
                 rig.boxes[#rig.boxes + 1] = box
 
                 for _, cornerX in ipairs({ -1, 1 }) do
@@ -302,21 +303,25 @@ end
 ---Lowest height the camera may have at (x, z) without being inside, or
 ---within the hard margin of, any vehicle in the rig.
 ---@param soft boolean @Also ease the requirement down over SOFT_FADE beyond the margin
+---@param skipRoot boolean|nil @Ignore the controlled vehicle itself (the drive-over goes under it)
 ---@return number @Minimum world height, or -math.huge where nothing applies
-function DroneCamRig.getVehicleFloor(rig, x, z, soft)
+function DroneCamRig.getVehicleFloor(rig, x, z, soft, skipRoot)
     local floor = -math.huge
     local margin = DroneCamRig.HARD_MARGIN
     local fade = DroneCamRig.SOFT_FADE
 
     for i = 1, #rig.boxes do
         local box = rig.boxes[i]
-        local distance = getDistanceOutside(box, x, z)
-        local top = box.ground + box.height + margin
 
-        if distance <= margin then
-            floor = math.max(floor, top)
-        elseif soft and distance < margin + fade then
-            floor = math.max(floor, top - (distance - margin) / fade * (top - box.ground))
+        if not (skipRoot and box.isRoot) then
+            local distance = getDistanceOutside(box, x, z)
+            local top = box.ground + box.height + margin
+
+            if distance <= margin then
+                floor = math.max(floor, top)
+            elseif soft and distance < margin + fade then
+                floor = math.max(floor, top - (distance - margin) / fade * (top - box.ground))
+            end
         end
     end
 
@@ -324,7 +329,8 @@ function DroneCamRig.getVehicleFloor(rig, x, z, soft)
 end
 
 ---@param soft boolean @Count the eased zone beyond the margin as well
+---@param skipRoot boolean|nil @Ignore the controlled vehicle itself
 ---@return boolean @True if the point is below the vehicle floor at its position
-function DroneCamRig.getIsInsideVehicle(rig, x, y, z, soft)
-    return y < DroneCamRig.getVehicleFloor(rig, x, z, soft)
+function DroneCamRig.getIsInsideVehicle(rig, x, y, z, soft, skipRoot)
+    return y < DroneCamRig.getVehicleFloor(rig, x, z, soft, skipRoot)
 end

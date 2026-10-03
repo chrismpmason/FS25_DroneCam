@@ -5,8 +5,12 @@
 ---fly-over, pull-out reveal, then round again. Each step has alternatives that
 ---stand in now and then, so no two loops are quite the same.
 ---
+---In about one loop in three the drive-over (camera on the ground, vehicle
+---driving over it) stands in for the fly-over step as a hero shot, when the
+---camera reports it can be done safely.
+---
 ---Random mode mixes everything, roughly alternating wide shots (including the
----creator shots) with close-ups.
+---creator shots and the drive-over) with close-ups.
 ---
 ---In both, wide and fixed shots are held directorMinShot..directorMaxShot
 ---seconds, moving shots movingMinShot..movingMaxShot and close-ups
@@ -34,9 +38,16 @@ DroneCamDirector.CLOSE_SHOTS = {
     S.SHOT_WHEEL, S.SHOT_IMPLEMENT, S.SHOT_SIDE, S.SHOT_FRONT, S.SHOT_REAR_QUARTER
 }
 
+---Hero shots run until the camera says they are finished, not to a clock.
+DroneCamDirector.HERO_SHOTS = { S.SHOT_DRIVE_OVER }
+
+---Longest a hero shot may run before the director takes over regardless.
+DroneCamDirector.HERO_MAX_TIME = 45
+
 ---Everything that is not a close-up, for random mode's wide/close mix.
 DroneCamDirector.WIDE_SHOTS = {}
-for _, list in ipairs({ DroneCamDirector.STATIC_WIDE_SHOTS, DroneCamDirector.FIXED_SHOTS, DroneCamDirector.MOVING_SHOTS }) do
+for _, list in ipairs({ DroneCamDirector.STATIC_WIDE_SHOTS, DroneCamDirector.FIXED_SHOTS, DroneCamDirector.MOVING_SHOTS,
+                        DroneCamDirector.HERO_SHOTS }) do
     for _, shot in ipairs(list) do
         DroneCamDirector.WIDE_SHOTS[#DroneCamDirector.WIDE_SHOTS + 1] = shot
     end
@@ -57,6 +68,11 @@ DroneCamDirector.STORY = {
     { S.SHOT_FLY_OVER, S.SHOT_SLIDE },
     { S.SHOT_PULL_OUT, S.MODE_ORBIT }
 }
+
+---The step a hero shot may take over, and how often: in about one loop in
+---three the drive-over plays in place of the fly-over (when it can).
+DroneCamDirector.HERO_STEP = 4
+DroneCamDirector.HERO_CHANCE = 1 / 3
 
 ---Chance a story step plays its usual shot rather than a stand-in.
 DroneCamDirector.STORY_USUAL_CHANCE = 0.65
@@ -115,6 +131,11 @@ function DroneCamDirector.getIsFixed(shot)
     return contains(DroneCamDirector.FIXED_SHOTS, shot)
 end
 
+---@return boolean
+function DroneCamDirector.getIsHero(shot)
+    return contains(DroneCamDirector.HERO_SHOTS, shot)
+end
+
 ---@param settings DroneCamSettings
 ---@return DroneCamDirector
 function DroneCamDirector.new(settings)
@@ -147,6 +168,7 @@ function DroneCamDirector:reset()
     self.straightTime = 0
     self.storyStep = 1
     self.closeUpsLeft = nil
+    self.heroThisLoop = false
 end
 
 ---@return boolean
@@ -185,6 +207,7 @@ function DroneCamDirector:start(initialShot, heading, isStory)
     self.isStory = isStory == true
     self.storyStep = 1
     self.closeUpsLeft = nil
+    self:rollHero()
 
     if contains(DroneCamDirector.STATIC_WIDE_SHOTS, initialShot) then
         self:cutTo(initialShot)
@@ -206,6 +229,7 @@ function DroneCamDirector:setStory(isStory)
         self.isStory = isStory
         self.storyStep = 1
         self.closeUpsLeft = nil
+        self:rollHero()
     end
 end
 
@@ -214,7 +238,10 @@ function DroneCamDirector:pickShotLength(shot)
     local settings = self.settings
     local minLength, maxLength
 
-    if DroneCamDirector.getIsCloseUp(shot) then
+    if DroneCamDirector.getIsHero(shot) then
+        -- Runs until the camera reports it finished (see getIsStillUsable).
+        return DroneCamDirector.HERO_MAX_TIME
+    elseif DroneCamDirector.getIsCloseUp(shot) then
         minLength, maxLength = settings.closeUpMinShot, settings.closeUpMaxShot
     elseif DroneCamDirector.getIsMoving(shot) then
         minLength, maxLength = settings.movingMinShot, settings.movingMaxShot
@@ -248,9 +275,17 @@ function DroneCamDirector:pickFrom(list)
     return candidates[self.random(#candidates)]
 end
 
+---Decides whether this loop of the story gets a hero shot.
+function DroneCamDirector:rollHero()
+    self.heroThisLoop = self.random() < DroneCamDirector.HERO_CHANCE
+end
+
 function DroneCamDirector:advanceStory()
     self.closeUpsLeft = nil
     self.storyStep = self.storyStep % #DroneCamDirector.STORY + 1
+    if self.storyStep == 1 then
+        self:rollHero()
+    end
 end
 
 ---Next shot of the story, skipping steps that have nothing available.
@@ -273,6 +308,12 @@ function DroneCamDirector:pickStoryShot()
                 end
                 return shot
             end
+        elseif self.storyStep == DroneCamDirector.HERO_STEP and self.heroThisLoop
+            and self:pickFrom(DroneCamDirector.HERO_SHOTS) ~= nil then
+            -- This loop's hero shot, in place of the usual step.
+            local shot = self:pickFrom(DroneCamDirector.HERO_SHOTS)
+            self:advanceStory()
+            return shot
         else
             -- Usual shot first most of the time, otherwise a random stand-in
             -- first; either way the rest follow in case the first is unavailable.

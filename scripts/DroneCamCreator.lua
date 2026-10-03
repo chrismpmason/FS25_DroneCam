@@ -71,6 +71,66 @@ DroneCamCreator.HEADLAND_MIN_SPEED = 0.5
 DroneCamCreator.SPOT_MIN_FOV = 20
 DroneCamCreator.SLIDE_FOV = 35
 
+---Drive-over: the camera sits on the ground in the vehicle's path, the vehicle
+---drives over it, the camera swings round to watch it go and then rises into
+---the chase position before anything towed behind can reach it.
+DroneCamCreator.DRIVE_OVER_HEIGHT = 0.3
+---The underside must clear the lens by this much as well (the near clip
+---plane is pulled in to 0.05m for the shot).
+DroneCamCreator.DRIVE_OVER_HEADROOM = 0.25
+DroneCamCreator.DRIVE_OVER_NEAR_CLIP = 0.05
+---How far ahead of the vehicle's front the camera goes: about nine seconds of
+---driving, kept within 30-40m.
+DroneCamCreator.DRIVE_OVER_LEAD_TIME = 9
+DroneCamCreator.DRIVE_OVER_MIN_DISTANCE = 30
+DroneCamCreator.DRIVE_OVER_MAX_DISTANCE = 40
+---Longest the approach may take. With the 30m minimum distance this also sets
+---the slowest speed the shot is used at: 2 m/s (7 km/h).
+DroneCamCreator.DRIVE_OVER_MAX_APPROACH = 15
+---Standing crop taller than this would hide the lens.
+DroneCamCreator.DRIVE_OVER_MAX_CROP = 0.25
+---The ground the vehicle rolls over at the camera must be this level, or its
+---underside comes closer than measured.
+DroneCamCreator.DRIVE_OVER_MAX_BUMP = 0.1
+---Upward raycasts that measure the underside: every PROFILE_STEP metres from
+---PROFILE_OVERHANG behind the vehicle to PROFILE_OVERHANG in front, at each
+---of the PROFILE_ACROSS offsets from the centre line.
+DroneCamCreator.DRIVE_OVER_PROFILE_STEP = 0.25
+DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG = 1
+DroneCamCreator.DRIVE_OVER_PROFILE_ACROSS = { -0.2, 0, 0.2 }
+---Something towed behind needs a clear gap in front of it this long, empty
+---all the way up on the centreline (no drawbar, top link or PTO shaft), to
+---rise through.
+DroneCamCreator.DRIVE_OVER_MIN_GAP = 2.5
+---Height above whatever is towed that the camera rises to, and how close that
+---may come before the camera must be up: a fixed margin plus a little per m/s.
+DroneCamCreator.DRIVE_OVER_RISE_CLEARANCE = 0.8
+DroneCamCreator.DRIVE_OVER_SAFE_DISTANCE = 1
+DroneCamCreator.DRIVE_OVER_SAFE_PER_SPEED = 0.3
+---Average climbing speed the rise may need; a tighter gap makes the shot
+---unavailable rather than letting the camera shoot upwards.
+DroneCamCreator.DRIVE_OVER_MAX_CLIMB = 4
+DroneCamCreator.DRIVE_OVER_MIN_RISE_HEIGHT = 2.5
+---Behind the vehicle's own rear by this much before the camera starts to rise.
+DroneCamCreator.DRIVE_OVER_REAR_CLEARANCE = 0.3
+DroneCamCreator.DRIVE_OVER_RISE_TIME = 1.2
+---The "under" phase starts when the front is this far off: the view is held
+---and tilts up to the underside instead of following the front overhead.
+DroneCamCreator.DRIVE_OVER_UNDER_LEAD = 3
+DroneCamCreator.DRIVE_OVER_UNDER_PITCH = math.rad(35)
+DroneCamCreator.DRIVE_OVER_SWING_TIME = 1.4
+---The swing turns faster than the usual 120 deg/s cap allows.
+DroneCamCreator.DRIVE_OVER_SWING_YAW_RATE = math.rad(220)
+DroneCamCreator.DRIVE_OVER_JOIN_TIME = 2.5
+DroneCamCreator.DRIVE_OVER_TAIL_TIME = 5
+---Abort while still well ahead if the vehicle stops or leaves the line.
+DroneCamCreator.DRIVE_OVER_COMMIT_DISTANCE = 6
+DroneCamCreator.DRIVE_OVER_STOP_SPEED = 0.5
+DroneCamCreator.DRIVE_OVER_STOP_TIME = 2
+DroneCamCreator.DRIVE_OVER_MAX_OFF_LINE = 0.5
+---Room needed before a field edge, beyond the drive-over itself.
+DroneCamCreator.DRIVE_OVER_EDGE_MARGIN = 20
+
 ---How often a fixed shot re-checks its sight line, and how long it may stay
 ---blocked before the shot is given up.
 DroneCamCreator.SIGHT_CHECK_INTERVAL = 0.25
@@ -87,12 +147,12 @@ end
 
 ---@return boolean
 function DroneCamCreator.getIsCreatorShot(shot)
-    return DroneCamDirector.getIsFixed(shot) or DroneCamDirector.getIsMoving(shot)
+    return DroneCamDirector.getIsFixed(shot) or DroneCamDirector.getIsMoving(shot) or DroneCamDirector.getIsHero(shot)
 end
 
 ---@return boolean @True for shots that are planned from a fixed spot
 function DroneCamCreator.getNeedsPlan(shot)
-    return DroneCamDirector.getIsFixed(shot)
+    return DroneCamDirector.getIsFixed(shot) or DroneCamDirector.getIsHero(shot)
 end
 
 ---@return number, number, number @Point on the vehicle the creator shots aim at
@@ -315,11 +375,181 @@ local function planHeadland(camera, vehicle, rig)
     return { shot = S.SHOT_HEADLAND, x = spot.x, y = spot.y, z = spot.z, frame = getFramingSize(rig) * 3 + 10 }
 end
 
+---Front edge (rig-local along) of whatever is towed behind the controlled
+---vehicle, and the height of its top above the ground at the vehicle.
+---@return number|nil, number
+local function getTowedFront(rig)
+    local front, top = nil, 0
+
+    for i = 1, #rig.boxes do
+        local box = rig.boxes[i]
+        if not box.isRoot then
+            local _, centreAlong = DroneCamRig.toLocal(rig, box.cx, box.cz)
+            local alongExtent = math.abs(box.fx * rig.fwdX + box.fz * rig.fwdZ) * box.halfLength
+                + math.abs(box.sx * rig.fwdX + box.sz * rig.fwdZ) * box.halfWidth
+            if centreAlong < rig.rootRear then
+                local edge = centreAlong + alongExtent
+                front = front == nil and edge or math.max(front, edge)
+                top = math.max(top, box.ground + box.height - rig.ground)
+            end
+        end
+    end
+
+    return front, top
+end
+
+---@return boolean @True if anything other than the controlled vehicle sits ahead of its rear (a header, a front mower)
+local function getHasFrontImplement(rig)
+    for i = 1, #rig.boxes do
+        local box = rig.boxes[i]
+        if not box.isRoot then
+            local _, centreAlong = DroneCamRig.toLocal(rig, box.cx, box.cz)
+            if centreAlong >= rig.rootRear then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function planDriveOver(camera, vehicle, rig)
+    local director = camera.director
+    local speed = camera.vehicleSpeed or 0
+
+    -- A straight run at a steady working speed.
+    if director == nil or not director.isRunning or director:getIsTurning()
+        or director.straightTime < DroneCamDirector.STRAIGHT_SETTLE_TIME then
+        return nil
+    end
+    if speed <= 0 then
+        return nil
+    end
+
+    -- Nothing out in front to run into the camera first.
+    if getHasFrontImplement(rig) then
+        return nil
+    end
+
+    local distance = math.min(math.max(speed * DroneCamCreator.DRIVE_OVER_LEAD_TIME, DroneCamCreator.DRIVE_OVER_MIN_DISTANCE),
+                              DroneCamCreator.DRIVE_OVER_MAX_DISTANCE)
+    if distance / speed > DroneCamCreator.DRIVE_OVER_MAX_APPROACH then
+        return nil
+    end
+
+    -- Centred between the rear wheels.
+    local left, right = DroneCamRig.getRearWheel(rig, -1), DroneCamRig.getRearWheel(rig, 1)
+    local centreAcross = (left.lx + right.lx) * 0.5
+    local function world(across, along)
+        return DroneCamRig.toWorld(rig, across, along)
+    end
+
+    -- The underside along the camera's line must clear the lens: the whole
+    -- length and a little past each end (weights and hitches stick out past
+    -- the nominal size), and a little either side of the centre.
+    local height = DroneCamCreator.DRIVE_OVER_HEIGHT
+    local needed = height + DroneCamCreator.DRIVE_OVER_HEADROOM
+    local along = rig.rootRear - DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG
+    while along <= rig.rootFront + DroneCamCreator.DRIVE_OVER_PROFILE_OVERHANG do
+        for _, offset in ipairs(DroneCamCreator.DRIVE_OVER_PROFILE_ACROSS) do
+            local x, z = world(centreAcross + offset, along)
+            local clearance = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, needed + 1)
+            if clearance == nil or clearance < needed then
+                return nil
+            end
+        end
+        along = along + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
+    end
+
+    -- Anything towed needs a clear gap to rise through, and time to do it.
+    local towedFront, towedTop = getTowedFront(rig)
+    local riseHeight = math.max(towedTop + DroneCamCreator.DRIVE_OVER_RISE_CLEARANCE, DroneCamCreator.DRIVE_OVER_MIN_RISE_HEIGHT)
+    local safeDistance = DroneCamCreator.DRIVE_OVER_SAFE_DISTANCE + DroneCamCreator.DRIVE_OVER_SAFE_PER_SPEED * speed
+
+    if towedFront ~= nil then
+        local gap = rig.rootRear - towedFront
+        if gap < DroneCamCreator.DRIVE_OVER_MIN_GAP then
+            return nil
+        end
+
+        local riseStart = gap - DroneCamCreator.DRIVE_OVER_REAR_CLEARANCE
+        local climbTime = (riseStart - safeDistance) / speed
+        if climbTime <= 0 or (riseHeight - height) / climbTime > DroneCamCreator.DRIVE_OVER_MAX_CLIMB then
+            return nil
+        end
+
+        local a = towedFront + 0.1
+        while a <= rig.rootRear - 0.1 do
+            local x, z = world(centreAcross, a)
+            local clearance = DroneCamSpot.getVehicleClearance(x, getTerrainHeight(x, z, rig.ground), z, riseHeight)
+            if clearance == nil or clearance < riseHeight then
+                return nil
+            end
+            a = a + DroneCamCreator.DRIVE_OVER_PROFILE_STEP
+        end
+    end
+
+    local spotAlong = rig.rootFront + distance
+    local x, z = world(centreAcross, spotAlong)
+    local ground = getTerrainHeight(x, z, rig.ground)
+    local y = ground + height
+
+    -- Level ground where the vehicle rolls over the camera.
+    local fwdX, fwdZ = rig.fwdX, rig.fwdZ
+    for _, offset in ipairs({ -1.5, -0.75, 0.75, 1.5 }) do
+        local bump = getTerrainHeight(x + fwdX * offset, z + fwdZ * offset, ground) - ground
+        if math.abs(bump) > DroneCamCreator.DRIVE_OVER_MAX_BUMP then
+            return nil
+        end
+    end
+
+    -- No standing crop to hide the lens, at the spot or on the way to it.
+    local step = 2
+    local sampled = 0
+    while sampled <= distance + 2 do
+        local cx, cz = world(centreAcross, rig.rootFront + sampled)
+        if DroneCamCamera.getCropHeightAt(cx, cz) > DroneCamCreator.DRIVE_OVER_MAX_CROP then
+            return nil
+        end
+        sampled = sampled + step
+    end
+
+    -- Not in or under anything, and able to see the vehicle coming.
+    local frontX, frontZ = world(centreAcross, rig.rootFront)
+    local frontY = rig.ground + rig.rootHeight * 0.4
+    if not DroneCamSpot.getIsSpotClear(x, y, z, height - 0.05)
+        or not DroneCamSpot.getHasLineOfSight(x, y, z, frontX, frontY, frontZ, 0.1) then
+        return nil
+    end
+
+    -- No headland turn before it is all over.
+    local runOut = distance + (rig.front - rig.rear)
+        + speed * (DroneCamCreator.DRIVE_OVER_SWING_TIME + DroneCamCreator.DRIVE_OVER_RISE_TIME
+                   + DroneCamCreator.DRIVE_OVER_JOIN_TIME + DroneCamCreator.DRIVE_OVER_TAIL_TIME)
+        + DroneCamCreator.DRIVE_OVER_EDGE_MARGIN
+    local vx, _, vz = getWorldTranslation(vehicle.rootNode)
+    if DroneCamField.getIsOnField(vx, vz) == true
+        and DroneCamField.getEdgeDistance(vx, vz, fwdX, fwdZ, runOut) ~= nil then
+        return nil
+    end
+
+    return {
+        shot = S.SHOT_DRIVE_OVER,
+        x = x, y = y, z = z, ground = ground,
+        centreAcross = centreAcross,
+        riseHeight = riseHeight,
+        safeDistance = safeDistance,
+        phase = "approach",
+        stopTime = 0, swingTime = 0, riseTime = 0, riseProgress = 0, joinTime = 0, tailTime = 0,
+        isDone = false
+    }
+end
+
 local PLANNERS = {
     [S.SHOT_ESTABLISHING] = planEstablishing,
     [S.SHOT_LONG_LENS] = planLongLens,
     [S.SHOT_EDGE_PAN] = planEdgePan,
-    [S.SHOT_HEADLAND] = planHeadland
+    [S.SHOT_HEADLAND] = planHeadland,
+    [S.SHOT_DRIVE_OVER] = planDriveOver
 }
 
 ---Finds a spot for a fixed shot.
@@ -343,7 +573,8 @@ end
 ---Re-checks a fixed shot's sight line every SIGHT_CHECK_INTERVAL seconds, from
 ---where the camera actually is.
 function DroneCamCreator.updateSight(plan, dtSeconds, cameraX, cameraY, cameraZ, vehicle)
-    if plan == nil then
+    if plan == nil or plan.shot == S.SHOT_DRIVE_OVER then
+        -- The drive-over watches its own approach (updateDriveOver).
         return
     end
 
@@ -364,6 +595,189 @@ function DroneCamCreator.updateSight(plan, dtSeconds, cameraX, cameraY, cameraZ,
             plan.isLost = true
         end
     end
+end
+
+---@return boolean @True while the drive-over has the camera down by the vehicle, before it joins the chase
+function DroneCamCreator.getIsDriveOverLow(camera)
+    local plan = camera.plan
+    return camera.shot == S.SHOT_DRIVE_OVER and camera.fromPose == nil and plan ~= nil
+        and plan.shot == S.SHOT_DRIVE_OVER and plan.phase ~= "join" and plan.phase ~= "tail" and not plan.isDone
+end
+
+---How much of the gentle sway to apply: none while the drive-over has the
+---camera placed to the centimetre, fading back in as it joins the chase.
+---@return number @0..1
+function DroneCamCreator.getSwayScale(camera)
+    local plan = camera.plan
+    if camera.shot ~= S.SHOT_DRIVE_OVER or camera.fromPose ~= nil or plan == nil or plan.shot ~= S.SHOT_DRIVE_OVER
+        or plan.isDone or plan.phase == "tail" then
+        return 1
+    elseif plan.phase == "join" then
+        return smoothstep(plan.joinTime / DroneCamCreator.DRIVE_OVER_JOIN_TIME)
+    end
+    return 0
+end
+
+---Advances the drive-over through its phases:
+---  approach  the vehicle drives towards the camera
+---  under     its front is close: hold the heading, tilt up to the underside
+---  swing     it is overhead: turn round in DRIVE_OVER_SWING_TIME
+---  rise      it has passed: climb clear of anything towed before it arrives
+---  join      glide into the chase position
+---  tail      hold the chase for a moment, then hand back to the director
+function DroneCamCreator.updateDriveOver(camera, dtSeconds, vehicle)
+    local plan = camera.plan
+    if camera.shot ~= S.SHOT_DRIVE_OVER or plan == nil or plan.shot ~= S.SHOT_DRIVE_OVER
+        or plan.isDone or plan.isLost then
+        return
+    end
+
+    local rig = camera:getRig(vehicle)
+    if rig == nil then
+        return
+    end
+
+    local across, along = DroneCamRig.toLocal(rig, plan.x, plan.z)
+    local speed = camera.vehicleSpeed or 0
+    plan.along = along
+
+    if plan.phase == "approach" or plan.phase == "under" then
+        if along > rig.rootFront + DroneCamCreator.DRIVE_OVER_COMMIT_DISTANCE then
+            -- Still well clear: give up if the vehicle stops, turns or leaves
+            -- the line rather than wait for something that will not come.
+            if speed < DroneCamCreator.DRIVE_OVER_STOP_SPEED then
+                plan.stopTime = plan.stopTime + dtSeconds
+            else
+                plan.stopTime = 0
+            end
+            if plan.stopTime > DroneCamCreator.DRIVE_OVER_STOP_TIME
+                or math.abs(across - plan.centreAcross) > DroneCamCreator.DRIVE_OVER_MAX_OFF_LINE
+                or camera.director:getIsTurning() then
+                plan.isLost = true
+                return
+            end
+        end
+
+        -- The swing is centred on the moment the middle of the vehicle is
+        -- overhead. The tilt before it gets at least UNDER_LEAD metres of
+        -- its own, however fast the vehicle is going.
+        local middle = (rig.rootFront + rig.rootRear) * 0.5
+        local swingStart = middle + speed * DroneCamCreator.DRIVE_OVER_SWING_TIME * 0.5
+        local underStart = math.max(rig.rootFront, swingStart) + DroneCamCreator.DRIVE_OVER_UNDER_LEAD
+
+        if plan.phase == "approach" and along <= underStart then
+            plan.phase = "under"
+            plan.underStart = along
+            plan.underEnd = swingStart
+            plan.yaw0 = camera.lastRotY or 0
+            plan.pitch0 = camera.lastRotX or 0
+        end
+
+        if plan.phase == "under" and along <= plan.underEnd then
+            plan.phase = "swing"
+            plan.swingTime = 0
+            plan.swingPitch = plan.underPitch or DroneCamCreator.DRIVE_OVER_UNDER_PITCH
+        end
+    elseif plan.phase == "swing" then
+        plan.swingTime = plan.swingTime + dtSeconds
+    end
+
+    -- The rise starts once the vehicle itself has passed, swing or no swing,
+    -- and is paced by whatever is towed so it is always up in time.
+    if (plan.phase == "swing" or plan.phase == "rise") then
+        if not plan.riseStarted and along <= rig.rootRear - DroneCamCreator.DRIVE_OVER_REAR_CLEARANCE then
+            plan.riseStarted = true
+            local towedFront = getTowedFront(rig)
+            plan.riseStartGap = towedFront ~= nil and (along - towedFront) or nil
+        end
+
+        if plan.riseStarted then
+            plan.riseTime = plan.riseTime + dtSeconds
+            local progress = plan.riseTime / DroneCamCreator.DRIVE_OVER_RISE_TIME
+            local towedFront = getTowedFront(rig)
+            if plan.riseStartGap ~= nil and towedFront ~= nil then
+                local span = math.max(plan.riseStartGap - plan.safeDistance, 0.01)
+                progress = math.max(progress, (plan.riseStartGap - (along - towedFront)) / span)
+            end
+            plan.riseProgress = math.min(math.max(plan.riseProgress, progress), 1)
+        end
+    end
+
+    if plan.phase == "swing" and plan.swingTime >= DroneCamCreator.DRIVE_OVER_SWING_TIME then
+        plan.phase = "rise"
+    end
+
+    if plan.phase == "rise" and plan.riseProgress >= 1 then
+        plan.phase = "join"
+        plan.joinTime = 0
+    elseif plan.phase == "join" then
+        plan.joinTime = plan.joinTime + dtSeconds
+        if plan.joinTime >= DroneCamCreator.DRIVE_OVER_JOIN_TIME then
+            plan.phase = "tail"
+            plan.tailTime = 0
+        end
+    elseif plan.phase == "tail" then
+        plan.tailTime = plan.tailTime + dtSeconds
+        if plan.tailTime >= DroneCamCreator.DRIVE_OVER_TAIL_TIME then
+            plan.isDone = true
+        end
+    end
+end
+
+---Transform for the drive-over, phase by phase.
+local function getDriveOverTransform(camera, vehicle, plan)
+    local rig = camera:getRig(vehicle)
+    local chaseX, chaseY, chaseZ, chaseLookX, chaseLookY, chaseLookZ = camera:getModeTransform(vehicle, S.MODE_CHASE)
+
+    if rig == nil then
+        return chaseX, chaseY, chaseZ, chaseLookX, chaseLookY, chaseLookZ, nil, nil, 0
+    end
+
+    local lookHeight = rig.ground + rig.rootHeight * 0.4
+    local frontX, frontZ = DroneCamRig.toWorld(rig, plan.centreAcross, rig.rootFront)
+    -- Watching it go: aim at the middle of the vehicle, not its rear face,
+    -- which is right overhead just after it passes.
+    local awayX, awayY, awayZ = getVehicleAim(vehicle)
+
+    local riseY = plan.ground + plan.riseHeight
+    local y = lerp(plan.y, riseY, smoothstep(plan.riseProgress))
+
+    local phase = plan.phase
+    if phase == "approach" then
+        return plan.x, plan.y, plan.z, frontX, lookHeight, frontZ, nil, nil, 0
+    end
+
+    if phase == "under" then
+        -- Hold the heading and tilt up as the front comes overhead.
+        local span = math.max(plan.underStart - plan.underEnd, 0.01)
+        local tilt = smoothstep((plan.underStart - (plan.along or plan.underStart)) / span)
+        local pitch = lerp(plan.pitch0, DroneCamCreator.DRIVE_OVER_UNDER_PITCH, tilt)
+        plan.underPitch = pitch
+        return plan.x, plan.y, plan.z, frontX, lookHeight, frontZ, plan.yaw0, pitch, 1
+    end
+
+    if phase == "swing" then
+        local t = math.min(plan.swingTime / DroneCamCreator.DRIVE_OVER_SWING_TIME, 1)
+        local eased = smoothstep(t)
+        local yaw = plan.yaw0 + camera.shotSide * math.pi * eased
+        -- End the tilt exactly where aiming at the departing vehicle would put
+        -- it, so the hand-over at the end of the swing is seamless.
+        local dx, dy, dz = awayX - plan.x, awayY - y, awayZ - plan.z
+        local departPitch = math.atan2(dy, math.max(math.sqrt(dx * dx + dz * dz), 0.01))
+        local pitch = lerp(plan.swingPitch, departPitch, eased)
+        -- Hand over to aiming at the departing vehicle for the last fifth.
+        local weight = 1 - smoothstep((t - 0.8) / 0.2)
+        return plan.x, y, plan.z, awayX, awayY, awayZ, yaw, pitch, weight
+    end
+
+    if phase == "rise" then
+        return plan.x, y, plan.z, awayX, awayY, awayZ, nil, nil, 0
+    end
+
+    local joined = phase == "join" and smoothstep(plan.joinTime / DroneCamCreator.DRIVE_OVER_JOIN_TIME) or 1
+    return lerp(plan.x, chaseX, joined), lerp(riseY, chaseY, joined), lerp(plan.z, chaseZ, joined),
+           lerp(awayX, chaseLookX, joined), lerp(awayY, chaseLookY, joined), lerp(awayZ, chaseLookZ, joined),
+           nil, nil, 0
 end
 
 ---Position along a moving shot's path in the vehicle's (smoothed) frame:
@@ -406,6 +820,13 @@ function DroneCamCreator.getTransform(camera, vehicle, shot)
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
     local aimX, aimY, aimZ = getVehicleAim(vehicle)
     local plan = camera.plan
+
+    if shot == S.SHOT_DRIVE_OVER then
+        if plan == nil or plan.shot ~= shot then
+            return vx, vy + camera.settings.chaseHeight, vz, aimX, aimY, aimZ, nil, nil, 0
+        end
+        return getDriveOverTransform(camera, vehicle, plan)
+    end
 
     if DroneCamDirector.getIsFixed(shot) then
         if plan == nil or plan.shot ~= shot then
@@ -465,6 +886,16 @@ end
 function DroneCamCreator.getTracking(camera, shot)
     local settings = camera.settings
     local close = DroneCamCamera.CLOSEUP_CLEARANCE
+
+    if shot == S.SHOT_DRIVE_OVER then
+        local plan = camera.plan
+        if plan == nil or plan.shot ~= shot or plan.phase == "tail" then
+            return 0, settings.minClearance
+        elseif plan.phase == "join" then
+            return 0, lerp(close, settings.minClearance, smoothstep(plan.joinTime / DroneCamCreator.DRIVE_OVER_JOIN_TIME))
+        end
+        return 0, DroneCamCreator.DRIVE_OVER_HEIGHT - 0.05
+    end
 
     if shot == S.SHOT_ESTABLISHING or shot == S.SHOT_PUSH_IN or shot == S.SHOT_SLIDE then
         return 0, settings.minClearance

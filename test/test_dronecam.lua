@@ -108,6 +108,15 @@ function pointInBox(x, y, z, box, margin)
         and z > box[5] - margin and z < box[6] + margin
 end
 
+-- Collision bodies of the vehicle being driven, as world boxes rebuilt every
+-- tick from vehicle.bodies. They carry the VEHICLE flag; OBSTACLES carry
+-- STATIC_OBJECT. Raycasts only hit what their mask includes.
+VEHICLE_BODIES = {}
+
+function maskHas(mask, flag)
+    return math.floor(mask / flag) % 2 == 1
+end
+
 RAYCAST_HIT = false
 RaycastUtil = {}
 function RaycastUtil.raycastClosest(x, y, z, dx, dy, dz, maxDistance, mask)
@@ -116,12 +125,23 @@ function RaycastUtil.raycastClosest(x, y, z, dx, dy, dz, maxDistance, mask)
     assert(math.abs(len - 1) < 0.001, "direction not normalised: " .. len)
     if RAYCAST_HIT then return 99, x, y, z, maxDistance * 0.5 end
     local best, bestId = nil, nil
-    for i, box in ipairs(OBSTACLES) do
-        local t = rayBox(x, y, z, dx, dy, dz, box)
-        if t ~= nil and t <= maxDistance and (best == nil or t < best) then best, bestId = t, 500 + i end
+    local function consider(boxes, flag, idBase)
+        if not maskHas(mask, flag) then return end
+        for i, box in ipairs(boxes) do
+            local t = rayBox(x, y, z, dx, dy, dz, box)
+            if t ~= nil and t <= maxDistance and (best == nil or t < best) then best, bestId = t, idBase + i end
+        end
     end
+    consider(OBSTACLES, CollisionFlag.STATIC_OBJECT, 500)
+    consider(VEHICLE_BODIES, CollisionFlag.VEHICLE, 900)
     if best ~= nil then return bestId, x + dx * best, y + dy * best, z + dz * best, best end
     return nil
+end
+
+NEAR_CLIP = 0.5
+function setNearClip(node, distance)
+    assert(nodes[node], "setNearClip on dead node")
+    NEAR_CLIP = distance
 end
 
 -- Fields: FIELD is a rectangle {minX, maxX, minZ, maxZ}, or nil for no field.
@@ -263,8 +283,8 @@ local function tick(seconds, working, headingRate, onStep)
             heading = heading + (headingRate or 0) * (dt / 1000)
             nodes[vehicle.rootNode].ry = heading
             local fx, _, fz = localDirectionToWorld(vehicle.rootNode, 0, 0, 1)
-            nodes[vehicle.rootNode].x = nodes[vehicle.rootNode].x + fx * 8 * (dt / 1000)
-            nodes[vehicle.rootNode].z = nodes[vehicle.rootNode].z + fz * 8 * (dt / 1000)
+            nodes[vehicle.rootNode].x = nodes[vehicle.rootNode].x + fx * VEHICLE_SPEED * (dt / 1000)
+            nodes[vehicle.rootNode].z = nodes[vehicle.rootNode].z + fz * VEHICLE_SPEED * (dt / 1000)
 
             -- Keep the vehicle camera roughly where the game would put it.
             nodes[vehicleCamNode].x = nodes[vehicle.rootNode].x
@@ -280,6 +300,22 @@ local function tick(seconds, working, headingRate, onStep)
                 n.z = root.z - math.sin(heading) * part.across + math.cos(heading) * part.along
                 n.y = root.y + part.up
                 n.ry = heading
+            end
+
+            -- Collision bodies {minAcross, maxAcross, minY, maxY, minAlong,
+            -- maxAlong} as world boxes (bounding the rotated box).
+            VEHICLE_BODIES = {}
+            local c, s = math.cos(heading), math.sin(heading)
+            for _, b in ipairs(vehicle.bodies or {}) do
+                local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+                for _, across in ipairs({ b[1], b[2] }) do
+                    for _, along in ipairs({ b[5], b[6] }) do
+                        local wx = root.x + c * across + s * along
+                        local wz = root.z - s * across + c * along
+                        minX, maxX, minZ, maxZ = math.min(minX, wx), math.max(maxX, wx), math.min(minZ, wz), math.max(maxZ, wz)
+                    end
+                end
+                VEHICLE_BODIES[#VEHICLE_BODIES + 1] = { minX, maxX, root.y + b[3], root.y + b[4], minZ, maxZ }
             end
 
             if working then
@@ -304,6 +340,22 @@ local function droneIsActive()
     local node = DroneCam.camera and DroneCam.camera:getCameraNode()
     return node ~= nil and activeCamera == node
 end
+
+-- The drive-over's swing turns the view faster than anything else may, by
+-- design. Its frames are kept out of the general smoothness limits and held
+-- to their own (SWING_MAX_TURN is checked by the drive-over tests).
+SWING_MAX_TURN = 0
+function countTurn(turn)
+    local camera = DroneCam.camera
+    local plan = camera and camera.plan
+    if camera ~= nil and camera.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan ~= nil and plan.phase == "swing" then
+        SWING_MAX_TURN = math.max(SWING_MAX_TURN, turn)
+        return 0
+    end
+    return turn
+end
+
+VEHICLE_SPEED = 8
 
 local failures = 0
 local function check(label, condition, detail)
@@ -535,7 +587,7 @@ local function measureMotion(seconds, working, headingRate, onStep)
         local x, y, z = getWorldTranslation(cn)
         local rx, ry = nodes[cn].rx, nodes[cn].ry
         maxStep = math.max(maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
-        maxTurn = math.max(maxTurn, math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))
+        maxTurn = math.max(maxTurn, countTurn(math.max(math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))))
         px, py, pz, prx, pry = x, y, z, rx, ry
         if onStep ~= nil then onStep(dtSeconds) end
     end)
@@ -582,7 +634,7 @@ local HEADLAND = DroneCamSettings.SHOT_HEADLAND
 
 ---Everything is available except the headland shot, which the camera only
 ---offers near the end of a row.
-local function notHeadland(shot) return shot ~= HEADLAND end
+local function notHeadland(shot) return shot ~= HEADLAND and shot ~= DroneCamSettings.SHOT_DRIVE_OVER end
 
 local director = DroneCamDirector.new(DroneCam.settings)
 director.random = makeRng(12345)
@@ -648,14 +700,14 @@ check("roughly alternates wide and close (65-85% of cuts change group)",
 
 local noImplement = DroneCamDirector.new(DroneCam.settings)
 noImplement.random = makeRng(555)
-noImplement.isShotAvailable = function(shot) return shot ~= DroneCamSettings.SHOT_IMPLEMENT and shot ~= HEADLAND end
+noImplement.isShotAvailable = function(shot) return shot ~= DroneCamSettings.SHOT_IMPLEMENT and notHeadland(shot) end
 noImplement:start(CHASE, 0, false)
 check("skips the implement shot when there is no implement",
       not survey(noImplement, 1500).seen[DroneCamSettings.SHOT_IMPLEMENT])
 
 local noSpots = DroneCamDirector.new(DroneCam.settings)
 noSpots.random = makeRng(556)
-noSpots.isShotAvailable = function(shot) return not DroneCamDirector.getIsFixed(shot) end
+noSpots.isShotAvailable = function(shot) return not DroneCamDirector.getIsFixed(shot) and shot ~= DroneCamSettings.SHOT_DRIVE_OVER end
 noSpots:start(CHASE, 0, false)
 local noSpotStats = survey(noSpots, 1500)
 local anyFixed = false
@@ -704,6 +756,7 @@ for step, entry in ipairs(DroneCamDirector.STORY) do
         for _, shot in ipairs(entry) do STEP_OF[shot] = step end
     end
 end
+STEP_OF[DroneCamSettings.SHOT_DRIVE_OVER] = DroneCamDirector.HERO_STEP
 
 local outOfOrder, loops, runs, badRun, usualCount, standInCount = 0, 0, {}, 0, 0, 0
 local closeRun = 0
@@ -752,7 +805,7 @@ check("story never repeats a shot", storyStats.repeats == 0)
 local gappy = DroneCamDirector.new(DroneCam.settings)
 gappy.random = makeRng(1357)
 gappy.isShotAvailable = function(shot)
-    return shot ~= HEADLAND and shot ~= DroneCamSettings.SHOT_ESTABLISHING and shot ~= DroneCamSettings.SHOT_FLY_OVER
+    return notHeadland(shot) and shot ~= DroneCamSettings.SHOT_ESTABLISHING and shot ~= DroneCamSettings.SHOT_FLY_OVER
 end
 gappy:start(nil, 0, true)
 local gappyStats = survey(gappy, 1500)
@@ -765,7 +818,7 @@ print("\n-- auto director: headland shot near the end of the row --")
 local rowEnd = false
 local headlander = DroneCamDirector.new(DroneCam.settings)
 headlander.random = makeRng(97)
-headlander.isShotAvailable = function(shot) return shot ~= HEADLAND or rowEnd end
+headlander.isShotAvailable = function(shot) return shot ~= DroneCamSettings.SHOT_DRIVE_OVER and (shot ~= HEADLAND or rowEnd) end
 headlander:start(nil, 0, true)
 survey(headlander, 40)
 check("no headland shot mid-row", headlander.shot ~= HEADLAND)
@@ -1006,6 +1059,13 @@ local function makeRig(spec)
     end
     v.getChildVehicles = function() return children end
 
+    -- Collision bodies, all given relative to the root vehicle (see tick).
+    v.bodies = {}
+    for _, b in ipairs(spec.bodies or {}) do v.bodies[#v.bodies + 1] = b end
+    for _, imp in ipairs(spec.implements or {}) do
+        for _, b in ipairs(imp.bodies or {}) do v.bodies[#v.bodies + 1] = b end
+    end
+
     return v
 end
 
@@ -1153,12 +1213,12 @@ local function flyAndCheck(seconds, headingRate, cropHeight)
         local x, y, z = getWorldTranslation(cn)
         local rx, ry = nodes[cn].rx, nodes[cn].ry
         result.maxStep = math.max(result.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
-        result.maxTurn = math.max(result.maxTurn, math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))
+        result.maxTurn = math.max(result.maxTurn, countTurn(math.max(math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))))
         px, py, pz, prx, pry = x, y, z, rx, ry
 
         if camera.floorsArmed then
             local rigCheck = DroneCamRig.measure(vehicle, heading)
-            if y < DroneCamRig.getVehicleFloor(rigCheck, x, z, false) - 1e-6 then result.inside = result.inside + 1 end
+            if y < DroneCamRig.getVehicleFloor(rigCheck, x, z, false, DroneCamCreator.getIsDriveOverLow(camera)) - 1e-6 then result.inside = result.inside + 1 end
             if y < TERRAIN_HEIGHT + 0.5 then result.underground = result.underground + 1 end
             if cropHeight ~= nil and y < TERRAIN_HEIGHT + cropHeight then result.inCrop = result.inCrop + 1 end
         end
@@ -1263,10 +1323,13 @@ check("solo tractor: never inside, smooth", soloFlight.inside == 0 and soloFligh
 
 print("\n-- close-ups in flight: combine in standing maize --")
 CROP_AT = function() return 1, 5 end
+-- Random mode: about every other shot is a close-up, so all five come up.
+DroneCam.settings.mode = AUTO_RANDOM
 driveVehicle(makeRig(COMBINE))
 tick(3, true)
 camera.director.random = makeRng(90210)
 local maize = flyAndCheck(300, 0, 3.2 + DroneCamCamera.CROP_HARD_MARGIN - 1e-6)
+DroneCam.settings.mode = AUTO
 print(("        300s: worst frame %.2fm / %.2f deg, lowest close-up %.2fm"):format(maize.maxStep, maize.maxTurn, maize.lowest))
 check("flies every close-up over a combine", allCloseSeen(maize.seen))
 check("never into the maize", maize.inCrop == 0, maize.inCrop .. " frames")
@@ -1553,7 +1616,7 @@ local function flyWorld(seconds, headingRate, onStep)
         local flying = droneIsActive()
         if flying and wasFlying then
             r.maxStep = math.max(r.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
-            r.maxTurn = math.max(r.maxTurn, math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))
+            r.maxTurn = math.max(r.maxTurn, countTurn(math.max(math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))))
             r.maxFov = math.max(r.maxFov, math.abs(camera.appliedFov - pfov))
         end
         wasFlying = flying
@@ -1562,7 +1625,7 @@ local function flyWorld(seconds, headingRate, onStep)
         if insideAnyObstacle(x, y, z, 0) then r.inObstacle = r.inObstacle + 1 end
         if camera.floorsArmed then
             local rigCheck = DroneCamRig.measure(vehicle, heading)
-            if y < DroneCamRig.getVehicleFloor(rigCheck, x, z, false) - 1e-6 then r.inside = r.inside + 1 end
+            if y < DroneCamRig.getVehicleFloor(rigCheck, x, z, false, DroneCamCreator.getIsDriveOverLow(camera)) - 1e-6 then r.inside = r.inside + 1 end
             if y < TERRAIN_HEIGHT + 0.5 then r.underground = r.underground + 1 end
         end
 
@@ -1710,6 +1773,350 @@ FIELD = nil
 DroneCam.settings.mode = CHASE
 driveVehicle(plainVehicle)
 end
+
+--------------------------------------------------------------- drive-over
+
+-- In a function of its own: Lua 5.1 allows only 200 locals per function.
+(function()
+local DRIVE_OVER = DroneCamSettings.SHOT_DRIVE_OVER
+local camera = DroneCam.camera
+local cn = camera:getCameraNode()
+
+-- A tractor with a real underside: the body starts 0.65m up.
+local BODY = { -1.0, 1.0, 0.65, 3.0, -2.5, 2.5 }
+local SOLO_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY } }
+-- The same with front weights hanging down to 0.45m.
+local LOW_TRACTOR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                      bodies = { BODY, { -0.5, 0.5, 0.45, 1.0, 2.2, 2.8 } } }
+-- Trailed kit 4.5m behind, nothing on the centreline in between.
+local TOWED = { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
+                bodies = { { -2, 2, 0.3, 1.6, -11, -7 } } }
+local TRAILED_CLEAR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+                        implements = { TOWED } }
+-- The same with a drawbar down the middle of the gap.
+local TOWED_DRAWBAR = { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
+                        bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -0.1, 0.1, 0.4, 0.6, -7, -2.5 } } }
+local TRAILED_DRAWBAR = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+                          implements = { TOWED_DRAWBAR } }
+local MOUNTED = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+                  implements = TRACTOR.implements }
+local COMBINE_BODY = { width = 3.6, length = 9, height = 4, wheels = COMBINE.wheels, bodies = { { -1.5, 1.5, 0.8, 4, -4.5, 4.5 } },
+                       implements = COMBINE.implements }
+
+---Gives a rig a work area of its own if it has nothing attached, so the
+---drone flies for it.
+local function makeWorking(spec)
+    local v = makeRig(spec)
+    if spec.implements == nil then
+        v.spec_workArea = { workAreas = { { lastProcessingTime = -10000 } } }
+    end
+    return v
+end
+
+---Lands, puts the vehicle at (0, z) heading north at the given speed and gets
+---the drone flying straight in random mode.
+local function startOn(spec, z, speed)
+    vehicle = makeWorking(spec)
+    VEHICLE_SPEED = speed or 3
+    tick(12, false)
+    nodes[vehicle.rootNode].x, nodes[vehicle.rootNode].z = 0, z or 0
+    heading = 0
+    DroneCam.settings.mode = AUTO_RANDOM
+    tick(4, true)
+    camera.director.random = makeRng(31337)
+    -- Hold whatever is on screen while the checks run.
+    camera.director.shotLength = 600
+end
+
+local function available()
+    camera.planCache = {}
+    return camera:getIsShotAvailable(DRIVE_OVER)
+end
+
+print("\n-- drive-over: when it is offered --")
+FIELD, OBSTACLES = nil, {}
+startOn(SOLO_TRACTOR)
+check("offered on a straight run with room underneath", available())
+camera.planCache = {}
+local plan = camera:getPlan(DRIVE_OVER)
+local rig = DroneCamRig.measure(vehicle, heading)
+local pAcross, pAlong = DroneCamRig.toLocal(rig, plan.x, plan.z)
+check("camera goes 30-40m ahead of the front", pAlong - rig.rootFront >= 30 - 1e-6 and pAlong - rig.rootFront <= 40 + 1e-6,
+      ("%.1fm"):format(pAlong - rig.rootFront))
+check("about 0.3m up", math.abs(plan.y - TERRAIN_HEIGHT - 0.3) < 1e-6)
+check("centred between the wheels", math.abs(pAcross) < 0.05, ("%.2f"):format(pAcross))
+
+-- A tree canopy overhanging the spot: the view of the tractor underneath is
+-- clear, but the camera would be sitting under a tree.
+OBSTACLES = { { plan.x - 3, plan.x + 3, 2.5, 12, plan.z - 3, plan.z + 3 } }
+check("not offered under a tree", not available())
+OBSTACLES = {}
+
+CROP_AT = function() return 1, 5 end
+check("not offered in standing maize", not available())
+local realFruit = g_fruitTypeManager.getFruitTypeByIndex
+g_fruitTypeManager.getFruitTypeByIndex = function(self, index)
+    if index == 2 then return { name = "GRASS", minHarvestingGrowthState = 4, cutState = 9 } end
+    return realFruit(self, index)
+end
+CROP_AT = function() return 2, 1 end
+check("offered over short young grass", available())
+g_fruitTypeManager.getFruitTypeByIndex = realFruit
+CROP_AT = function() return 0, 0 end
+
+FIELD = { -100, 100, -300, 60 }
+check("not offered with the row end 60m ahead", not available())
+FIELD = { -100, 100, -300, 3000 }
+check("offered with plenty of row left", available())
+FIELD = nil
+
+VEHICLE_SPEED = 1
+tick(4, true)
+check("not offered when crawling along", not available())
+VEHICLE_SPEED = 3
+tick(4, true)
+tick(1, true, math.rad(30))
+check("not offered while turning", not available())
+tick(1, true, math.rad(-30))
+tick(0.6, true)
+check("not offered until settled on the new line", not available())
+tick(3, true)
+check("offered again once straight", available())
+
+startOn(LOW_TRACTOR)
+check("not offered when the tractor sits too low", not available())
+startOn(MOUNTED)
+check("not offered with a mounted implement (no room to rise)", not available())
+startOn(TRAILED_DRAWBAR)
+check("not offered with a drawbar down the middle", not available())
+-- A shaft or top link high in the middle of the gap: the underside of the
+-- tractor is fine, but there is no clear way up between tractor and kit.
+startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+          implements = { { along = -9, width = 4, length = 4, height = 1.6, workWidth = 4, workDepth = 1,
+                           bodies = { { -2, 2, 0.3, 1.6, -11, -7 }, { -0.1, 0.1, 1.0, 1.2, -6, -4 } } } } })
+check("not offered with a shaft across the gap above", not available())
+startOn(TRAILED_CLEAR)
+check("offered with trailed kit and a clear gap", available())
+startOn(COMBINE_BODY)
+check("not offered with a header out front", not available())
+
+---Point to box distance; 0 inside.
+local function boxDistance(x, y, z, b)
+    local dx = math.max(b[1] - x, 0, x - b[2])
+    local dy = math.max(b[3] - y, 0, y - b[4])
+    local dz = math.max(b[5] - z, 0, z - b[6])
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+---Runs a drive-over to the end and records what the camera did.
+local function flyDriveOver(spec, speed)
+    startOn(spec, 0, speed)
+    local r = { phases = {}, order = {}, swingTime = 0, swingYaw = 0, closest = math.huge, wentUnder = false,
+                lowError = 0, clipOk = true, maxStep = 0, maxTurn = 0, startPitch = nil, done = false,
+                chaseGap = nil, lowestNearTowed = math.huge, runUp = nil }
+    if not available() then return nil end
+    camera.director:cutTo(DRIVE_OVER)
+    SWING_MAX_TURN = 0
+
+    local px, py, pz = getWorldTranslation(cn)
+    local prx, pry = nodes[cn].rx, nodes[cn].ry
+    local lastPhase = nil
+    tick(45, true, 0, function(dtSeconds)
+        local x, y, z = getWorldTranslation(cn)
+        local rx, ry = nodes[cn].rx, nodes[cn].ry
+        local p = camera.plan
+        local phase = camera.shot == DRIVE_OVER and p ~= nil and p.shot == DRIVE_OVER and p.phase or nil
+        r.maxStep = math.max(r.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
+        r.maxTurn = math.max(r.maxTurn, countTurn(math.max(math.deg(math.abs(rx - prx)), math.deg(math.abs(wrapAngle(ry - pry))))))
+        if phase ~= lastPhase and phase ~= nil then r.order[#r.order + 1] = phase end
+        -- Judge the approach view once the tractor is 20m out and the aim has settled.
+        if phase == "approach" and camera.fromPose == nil and r.startPitch == nil and p.along ~= nil then
+            local rigNow = DroneCamRig.measure(vehicle, heading)
+            if p.along <= rigNow.rootFront + 20 then r.startPitch = math.deg(rx) end
+        end
+        if phase == "swing" then
+            r.swingTime = r.swingTime + dtSeconds
+            r.swingYaw = r.swingYaw + math.deg(wrapAngle(ry - pry))
+        end
+        if (phase == "under" or phase == "swing") then
+            r.lowError = math.max(r.lowError, math.abs(y - TERRAIN_HEIGHT - 0.3))
+            if NEAR_CLIP > 0.05 + 1e-9 then r.clipOk = false end
+        end
+        for _, b in ipairs(VEHICLE_BODIES) do r.closest = math.min(r.closest, boxDistance(x, y, z, b)) end
+        local rigNow = DroneCamRig.measure(vehicle, heading)
+        if phase == "under" and r.runUp == nil and p.underStart ~= nil then
+            r.runUp = p.underStart - rigNow.rootFront
+        end
+        -- How high the drive-over keeps the camera whenever towed kit is
+        -- within 1.5m of it.
+        for _, box in ipairs(phase ~= nil and rigNow.boxes or {}) do
+            if not box.isRoot then
+                local dx, dz = x - box.cx, z - box.cz
+                local outAlong = math.max(math.abs(dx * box.fx + dz * box.fz) - box.halfLength, 0)
+                local outAcross = math.max(math.abs(dx * box.sx + dz * box.sz) - box.halfWidth, 0)
+                if math.sqrt(outAlong ^ 2 + outAcross ^ 2) < 1.5 then
+                    r.lowestNearTowed = math.min(r.lowestNearTowed, y - (box.ground + box.height))
+                end
+            end
+        end
+        local across, along = DroneCamRig.toLocal(rigNow, x, z)
+        if math.abs(across) < rigNow.rootHalfWidth and along < rigNow.rootFront and along > rigNow.rootRear then
+            r.wentUnder = true
+        end
+        if phase == "tail" then
+            local chaseX, chaseY, chaseZ = camera:getModeTransform(vehicle, DroneCamSettings.MODE_CHASE)
+            r.chaseGap = math.sqrt((x - chaseX) ^ 2 + (y - chaseY) ^ 2 + (z - chaseZ) ^ 2)
+        end
+        if p ~= nil and p.isDone then r.done = true end
+        lastPhase = phase
+        px, py, pz, prx, pry = x, y, z, rx, ry
+    end)
+    r.shotAfter = camera.shot
+    r.swingMaxTurn = SWING_MAX_TURN
+    return r
+end
+
+print("\n-- drive-over: in flight, tractor alone --")
+local solo = flyDriveOver(SOLO_TRACTOR)
+check("drive-over runs", solo ~= nil)
+if solo ~= nil then
+    print(("        phases %s, swing %.2fs / %.0f deg, closest to the body %.2fm"):format(
+          table.concat(solo.order, ">"), solo.swingTime, solo.swingYaw, solo.closest))
+    check("goes approach > under > swing > rise > join > tail",
+          table.concat(solo.order, ">") == "approach>under>swing>rise>join>tail", table.concat(solo.order, ">"))
+    check("looks slightly upward at the oncoming tractor", solo.startPitch ~= nil and solo.startPitch > 0 and solo.startPitch < 10,
+          tostring(solo.startPitch))
+    check("the tractor really drives over the camera", solo.wentUnder)
+    check("starts tilting up at least 3m before the front arrives", solo.runUp ~= nil and solo.runUp >= 3 - 0.1,
+          tostring(solo.runUp))
+    check("sits 0.3m up while it passes", solo.lowError < 0.01, ("off by %.3fm"):format(solo.lowError))
+    check("swings round about 180 degrees", math.abs(math.abs(solo.swingYaw) - 180) < 10, ("%.0f deg"):format(solo.swingYaw))
+    check("in 1-1.5 seconds", solo.swingTime >= 1 and solo.swingTime <= 1.5, ("%.2fs"):format(solo.swingTime))
+    check("the swing turns smoothly", solo.swingMaxTurn < 4, ("%.2f deg in a frame"):format(solo.swingMaxTurn))
+    check("never touches the tractor's underside", solo.closest >= 0.2, ("%.2fm"):format(solo.closest))
+    check("near clip pulled in while underneath", solo.clipOk)
+    check("near clip back to normal afterwards", math.abs(NEAR_CLIP - DroneCamCamera.NEAR_CLIP) < 1e-9)
+    check("ends in the chase position", solo.chaseGap ~= nil and solo.chaseGap < 3, tostring(solo.chaseGap))
+    check("then hands back to the director", solo.done and solo.shotAfter ~= DRIVE_OVER)
+    check("smooth apart from the swing", solo.maxStep < MAX_STEP and solo.maxTurn < MAX_TURN,
+          ("%.2fm / %.2f deg"):format(solo.maxStep, solo.maxTurn))
+end
+
+print("\n-- drive-over: in flight, with trailed kit --")
+-- 3.5 m/s leaves the rise only about 0.6s: it has to be paced by the kit.
+local towed = flyDriveOver(TRAILED_CLEAR, 3.5)
+check("drive-over runs with trailed kit", towed ~= nil)
+if towed ~= nil then
+    print(("        closest to any body %.2fm, lowest over the kit %.2fm"):format(towed.closest, towed.lowestNearTowed))
+    check("never touches the trailed kit", towed.closest >= 0.2, ("%.2fm"):format(towed.closest))
+    check("already risen clear when the kit comes within 1.5m", towed.lowestNearTowed >= 0.6 - 0.05,
+          ("%.2fm above it"):format(towed.lowestNearTowed))
+    check("trailed run completes", towed.done and table.concat(towed.order, ">") == "approach>under>swing>rise>join>tail",
+          table.concat(towed.order, ">"))
+end
+
+print("\n-- drive-over: the tractor stops on the way --")
+startOn(SOLO_TRACTOR)
+local stoppedUnder = false
+if available() then
+    camera.director:cutTo(DRIVE_OVER)
+    tick(4, true)
+    VEHICLE_SPEED = 0
+    tick(6, false, 0, function()
+        local x, _, z = getWorldTranslation(cn)
+        local rigNow = DroneCamRig.measure(vehicle, heading)
+        local across, along = DroneCamRig.toLocal(rigNow, x, z)
+        if math.abs(across) < rigNow.rootHalfWidth and along < rigNow.rootFront and along > rigNow.rootRear then
+            stoppedUnder = true
+        end
+    end)
+end
+check("gives up the drive-over when the tractor stops", camera.director.shot ~= DRIVE_OVER)
+check("without the tractor ever reaching the camera", not stoppedUnder)
+VEHICLE_SPEED = 3
+
+print("\n-- take-off to a far first shot --")
+FIELD, OBSTACLES = { -100, 100, -300, 3000 }, {}
+vehicle = makeWorking(SOLO_TRACTOR)
+VEHICLE_SPEED = 3
+tick(12, false)
+nodes[vehicle.rootNode].x, nodes[vehicle.rootNode].z = 0, 0
+heading = 0
+DroneCam.settings.mode = AUTO
+-- Always the lowest draw: the story opens on its usual establishing shot,
+-- which on this long field is some 300m out and 175m up.
+camera.director.random = function(n) if n then return 1 end return 0 end
+local takeOffStep, wasActive = 0, false
+local tpx, tpy, tpz = 0, 0, 0
+tick(14, true, 0, function()
+    local x, y, z = getWorldTranslation(cn)
+    local active = droneIsActive()
+    if active and wasActive then
+        takeOffStep = math.max(takeOffStep, math.sqrt((x - tpx) ^ 2 + (y - tpy) ^ 2 + (z - tpz) ^ 2))
+    end
+    wasActive, tpx, tpy, tpz = active, x, y, z
+end)
+local estX, estY, estZ = DroneCamCreator.getTransform(camera, vehicle, camera.shot)
+local arrivedBy = math.sqrt((tpx - estX) ^ 2 + (tpy - estY) ^ 2 + (tpz - estZ) ^ 2)
+check("story opens on the far establishing shot", camera.shot == DroneCamSettings.SHOT_ESTABLISHING and estY > 150)
+check("take-off flies out to it smoothly", takeOffStep < MAX_STEP, ("%.2fm in a frame"):format(takeOffStep))
+check("and gets there", arrivedBy < 10, ("%.1fm short"):format(arrivedBy))
+camera.director.random = makeRng(5)
+FIELD = nil
+
+print("\n-- drive-over in the story: a hero shot about one loop in three --")
+-- Wichmann-Hill: Park-Miller's consecutive draws are too correlated for a
+-- frequency test that rolls at the same point in every loop.
+local function makeWH(seed)
+    local s1, s2, s3 = seed % 30000 + 1, (seed * 7) % 30000 + 1, (seed * 13) % 30000 + 1
+    return function(n)
+        s1 = (171 * s1) % 30269
+        s2 = (172 * s2) % 30307
+        s3 = (170 * s3) % 30323
+        local f = (s1 / 30269 + s2 / 30307 + s3 / 30323) % 1
+        if n == nil then return f end
+        return math.floor(f * n) + 1
+    end
+end
+local hero = DroneCamDirector.new(DroneCam.settings)
+hero.random = makeWH(1)
+hero.isShotAvailable = function(shot) return shot ~= HEADLAND end
+hero.isShotStillUsable = function(shot)
+    if shot == DRIVE_OVER then return hero.shotTime < 12 end
+    return true
+end
+hero:start(nil, 0, true)
+local heroStats = survey(hero, 6000)
+local loops, heroes, misplaced = 0, 0, 0
+for i = 2, #heroStats.order do
+    local a, b = STEP_OF[heroStats.order[i - 1]], STEP_OF[heroStats.order[i]]
+    if b == 1 and a == 5 then loops = loops + 1 end
+    if heroStats.order[i] == DRIVE_OVER then
+        heroes = heroes + 1
+        if a ~= 3 or STEP_OF[heroStats.order[i + 1] or 0] ~= 5 then
+            if heroStats.order[i + 1] ~= nil then misplaced = misplaced + 1 end
+        end
+    end
+end
+local share = heroes / math.max(loops, 1)
+check("drive-over in about one loop in three", share > 0.22 and share < 0.45, ("%d of %d loops"):format(heroes, loops))
+check("always after the close-ups, in place of the fly-over", misplaced == 0, misplaced .. " misplaced")
+
+local randomHero = DroneCamDirector.new(DroneCam.settings)
+randomHero.random = makeWH(171717)
+randomHero.isShotAvailable = hero.isShotAvailable
+randomHero.isShotStillUsable = function(shot)
+    if shot == DRIVE_OVER then return randomHero.shotTime < 12 end
+    return true
+end
+randomHero:start(nil, 0, false)
+check("random mode uses the drive-over too", survey(randomHero, 3000).seen[DRIVE_OVER] == true)
+
+DroneCam.settings.mode = CHASE
+VEHICLE_SPEED = 8
+driveVehicle(plainVehicle)
+VEHICLE_BODIES = {}
+end)()
 
 print("\n-- settings round trip --")
 DroneCam.settings.chaseDistance = 55

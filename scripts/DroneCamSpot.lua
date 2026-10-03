@@ -43,11 +43,12 @@ local function getTerrainHeight(x, z)
     return getTerrainHeightAtWorldPos(terrainNode, x, 0, z)
 end
 
+---@param groundMargin number|nil @How far above the terrain the spot must be; TERRAIN_SIGHT_MARGIN by default
 ---@return boolean @True if the camera could stand here: not inside, under or against anything
-function DroneCamSpot.getIsSpotClear(x, y, z)
+function DroneCamSpot.getIsSpotClear(x, y, z, groundMargin)
     local mask = getMasks()
 
-    if y < getTerrainHeight(x, z) + DroneCamSpot.TERRAIN_SIGHT_MARGIN then
+    if y < getTerrainHeight(x, z) + (groundMargin or DroneCamSpot.TERRAIN_SIGHT_MARGIN) then
         return false
     end
 
@@ -65,8 +66,9 @@ function DroneCamSpot.getIsSpotClear(x, y, z)
     return true
 end
 
+---@param terrainMargin number|nil @Clearance the line must keep over the terrain; TERRAIN_SIGHT_MARGIN by default
 ---@return boolean @True if nothing solid lies between the two points
-function DroneCamSpot.getHasLineOfSight(x, y, z, targetX, targetY, targetZ)
+function DroneCamSpot.getHasLineOfSight(x, y, z, targetX, targetY, targetZ, terrainMargin)
     local _, mask = getMasks()
     local dx, dy, dz = targetX - x, targetY - y, targetZ - z
     local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -86,12 +88,29 @@ function DroneCamSpot.getHasLineOfSight(x, y, z, targetX, targetY, targetZ)
     for i = 1, samples - 1 do
         local f = i / samples
         local px, py, pz = x + dx * f, y + dy * f, z + dz * f
-        if py < getTerrainHeight(px, pz) + DroneCamSpot.TERRAIN_SIGHT_MARGIN then
+        if py < getTerrainHeight(px, pz) + (terrainMargin or DroneCamSpot.TERRAIN_SIGHT_MARGIN) then
             return false
         end
     end
 
     return true
+end
+
+---How far up a vehicle's underside is above a point on the ground, from an
+---upward raycast against vehicle collision.
+---@param maxHeight number @How far up to look
+---@return number|nil @Clearance in metres, maxHeight if nothing is there, nil if raycasts are unavailable
+function DroneCamSpot.getVehicleClearance(x, groundY, z, maxHeight)
+    if RaycastUtil == nil or RaycastUtil.raycastClosest == nil or CollisionFlag == nil then
+        return nil
+    end
+
+    local start = 0.02
+    local hitId, _, _, _, distance = RaycastUtil.raycastClosest(x, groundY + start, z, 0, 1, 0, maxHeight, CollisionFlag.VEHICLE)
+    if hitId == nil or hitId == 0 or distance == nil then
+        return maxHeight
+    end
+    return distance + start
 end
 
 ---@return boolean @A clear spot with a clear view of the target

@@ -42,6 +42,9 @@ DroneCamSettings.SHOT_FLY_OVER = 213
 DroneCamSettings.SHOT_RISE_UP = 214
 DroneCamSettings.SHOT_SLIDE = 215
 
+-- The hero shot: on the ground in the vehicle's path, letting it drive over.
+DroneCamSettings.SHOT_DRIVE_OVER = 221
+
 DroneCamSettings.MODE_L10N = {
     [DroneCamSettings.MODE_CHASE] = "droneCam_mode_chase",
     [DroneCamSettings.MODE_TOPDOWN] = "droneCam_mode_topDown",
