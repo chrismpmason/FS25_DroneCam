@@ -40,6 +40,32 @@ smoothing, terrain clamping and an obstacle raycast that lifts the shot clear of
 trees and buildings. No events are sent and nothing is synchronised, so it is
 safe in multiplayer and does nothing on a dedicated server.
 
+> **Public beta.** DroneCam is still being tested. Please report anything odd
+> on the [Issues](https://github.com/chrismpmason/FS25_DroneCam/issues) page,
+> with your `log.txt` and a short clip if you can.
+
+## Download
+
+**[Get the latest release](https://github.com/chrismpmason/FS25_DroneCam/releases)**:
+the newest version is at the top of the page. Download `FS25_DroneCam_beta.zip`
+under **Assets**. `TESTERS.txt` alongside it lists what to try and what to send
+back.
+
+Current beta: [DroneCam v0.9.3 Beta](https://github.com/chrismpmason/FS25_DroneCam/releases/tag/v0.9.3-beta).
+
+Use the zip from the release, not GitHub's green **Code** button: that
+downloads the source, with development files the game doesn't need.
+
+## Install
+
+1. Close Farming Simulator 25.
+2. Copy `FS25_DroneCam_beta.zip` into your mods folder. **Don't unzip it.**
+   The folder is usually `Documents\My Games\FarmingSimulator2025\mods`. If
+   OneDrive backs up your Documents, look under
+   `OneDrive\Documents\My Games\FarmingSimulator2025\mods` instead.
+3. Remove any older copy of DroneCam (zip or folder) from that folder.
+4. Start the game and tick **DroneCam (Beta)** in the mod list for your save.
+
 ## Controls
 
 All four are rebindable in the game's control settings.
@@ -137,3 +163,9 @@ twice. Move the zip into `mods/` only after removing the folder.
 To run it unpacked instead, put this folder in `mods/` directly — the game only
 loads unzipped mods with developer controls enabled (`<development><controls>`
 in `game.xml`).
+
+## License
+
+Free to use and modify for your own personal use. Please don't re-upload it to
+other mod sites; link here instead. Credit **The CMM Farmer**. See [LICENSE](LICENSE)
+for the full terms.
