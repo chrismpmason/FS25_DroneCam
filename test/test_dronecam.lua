@@ -253,8 +253,10 @@ dofile(MOD .. "/scripts/DroneCamRig.lua")
 dofile(MOD .. "/scripts/DroneCamField.lua")
 dofile(MOD .. "/scripts/DroneCamSpot.lua")
 dofile(MOD .. "/scripts/DroneCamKit.lua")
+dofile(MOD .. "/scripts/DroneCamPeers.lua")
 dofile(MOD .. "/scripts/DroneCamDirector.lua")
 dofile(MOD .. "/scripts/DroneCamCreator.lua")
+dofile(MOD .. "/scripts/DroneCamMulti.lua")
 dofile(MOD .. "/scripts/DroneCamCamera.lua")
 dofile(MOD .. "/scripts/DroneCam.lua")
 
@@ -292,6 +294,35 @@ g_localPlayer = {
 }
 
 local heading = 0
+
+-- Other vehicles in the world, each driving on its own: o.test = {x, z,
+-- heading, speed, turnRate, working}. They go into the game's vehicle list
+-- with the player's vehicle, as the game's VehicleSystem keeps them.
+OTHERS = {}
+
+---Puts a vehicle's root and everything attached to it where its test state says.
+function placeOther(o, dtSeconds)
+    local st = o.test
+    st.heading = st.heading + (st.turnRate or 0) * dtSeconds
+    st.x = st.x + math.sin(st.heading) * st.speed * dtSeconds
+    st.z = st.z + math.cos(st.heading) * st.speed * dtSeconds
+    local root = nodes[o.rootNode]
+    root.x, root.y, root.z, root.ry = st.x, TERRAIN_HEIGHT, st.z, st.heading
+    for _, part in ipairs(o.attached or {}) do
+        local n = nodes[part.node]
+        n.x = root.x + math.cos(st.heading) * part.across + math.sin(st.heading) * part.along
+        n.z = root.z - math.sin(st.heading) * part.across + math.cos(st.heading) * part.along
+        n.y = root.y + part.up
+        n.ry = st.heading
+    end
+    if st.working then
+        for _, child in ipairs(o:getChildVehicles()) do
+            for _, workArea in ipairs(child.spec_workArea and child.spec_workArea.workAreas or {}) do
+                workArea.lastProcessingTime = g_currentMission.time
+            end
+        end
+    end
+end
 
 ---Advances simulated time, moving the vehicle forward and stamping its work area.
 ---onStep, if given, is called after every frame.
@@ -354,6 +385,13 @@ local function tick(seconds, working, headingRate, onStep)
                 end
             end
         end
+
+        local all = { vehicle }
+        for _, o in ipairs(OTHERS) do
+            placeOther(o, dt / 1000)
+            all[#all + 1] = o
+        end
+        g_currentMission.vehicleSystem = { vehicles = all }
 
         DroneCam:update(dt)
 
@@ -664,8 +702,11 @@ local CLOSE_SHOTS = DroneCamDirector.CLOSE_SHOTS
 local HEADLAND = DroneCamSettings.SHOT_HEADLAND
 
 ---Everything is available except the headland shot, which the camera only
----offers near the end of a row.
-local function notHeadland(shot) return shot ~= HEADLAND and shot ~= DroneCamSettings.SHOT_DRIVE_OVER end
+---offers near the end of a row, the drive-over, and the shots with another
+---vehicle in them (there is no other vehicle in these tests).
+local function notHeadland(shot)
+    return shot ~= HEADLAND and shot ~= DroneCamSettings.SHOT_DRIVE_OVER and not DroneCamDirector.getIsMulti(shot)
+end
 
 local director = DroneCamDirector.new(DroneCam.settings)
 director.random = makeRng(12345)
@@ -738,7 +779,9 @@ check("skips the implement shot when there is no implement",
 
 local noSpots = DroneCamDirector.new(DroneCam.settings)
 noSpots.random = makeRng(556)
-noSpots.isShotAvailable = function(shot) return not DroneCamDirector.getIsFixed(shot) and shot ~= DroneCamSettings.SHOT_DRIVE_OVER end
+noSpots.isShotAvailable = function(shot)
+    return not DroneCamDirector.getIsFixed(shot) and shot ~= DroneCamSettings.SHOT_DRIVE_OVER and not DroneCamDirector.getIsMulti(shot)
+end
 noSpots:start(CHASE, 0, false)
 local noSpotStats = survey(noSpots, 1500)
 local anyFixed = false
@@ -849,7 +892,9 @@ print("\n-- auto director: headland shot near the end of the row --")
 local rowEnd = false
 local headlander = DroneCamDirector.new(DroneCam.settings)
 headlander.random = makeRng(97)
-headlander.isShotAvailable = function(shot) return shot ~= DroneCamSettings.SHOT_DRIVE_OVER and (shot ~= HEADLAND or rowEnd) end
+headlander.isShotAvailable = function(shot)
+    return shot ~= DroneCamSettings.SHOT_DRIVE_OVER and (shot ~= HEADLAND or rowEnd) and not DroneCamDirector.getIsMulti(shot)
+end
 headlander:start(nil, 0, true)
 survey(headlander, 40)
 check("no headland shot mid-row", headlander.shot ~= HEADLAND)
@@ -878,6 +923,7 @@ end
 
 local turner = DroneCamDirector.new(DroneCam.settings)
 turner.random = makeRng(4242)
+turner.isShotAvailable = function(shot) return not DroneCamDirector.getIsMulti(shot) end
 turner:start(CHASE, 0)
 turner.shotLength = 10
 local turnStart, turnRate, turnLength = 8, math.rad(30), 5
@@ -900,6 +946,7 @@ check("waits until the vehicle has settled on the new line",
 
 local wobbler = DroneCamDirector.new(DroneCam.settings)
 wobbler.random = makeRng(7)
+wobbler.isShotAvailable = function(shot) return not DroneCamDirector.getIsMulti(shot) end
 wobbler:start(CHASE, 0)
 wobbler.shotLength = 10
 -- Steering corrections: +-1.5 degrees of heading, about 3 deg/s at the peak.
@@ -909,6 +956,7 @@ check("ordinary steering corrections do not hold the cut", wobbleSwitch ~= nil a
 
 local escaper = DroneCamDirector.new(DroneCam.settings)
 escaper.random = makeRng(808)
+escaper.isShotAvailable = function(shot) return not DroneCamDirector.getIsMulti(shot) end
 escaper:start(CHASE, 0)
 escaper:cutTo(DroneCamSettings.SHOT_WHEEL)
 local te = runDirector(escaper, 2, function() return 0 end, 0)
@@ -3007,7 +3055,7 @@ local function makeWH(seed)
 end
 local hero = DroneCamDirector.new(DroneCam.settings)
 hero.random = makeWH(1)
-hero.isShotAvailable = function(shot) return shot ~= HEADLAND end
+hero.isShotAvailable = function(shot) return shot ~= HEADLAND and not DroneCamDirector.getIsMulti(shot) end
 hero.isShotStillUsable = function(shot)
     if shot == DRIVE_OVER then return hero.shotTime < 12 end
     return true
@@ -3120,7 +3168,7 @@ local function mix(class)
     local d = DroneCamDirector.new(settings)
     d.random = makeWH(2468)
     d.fieldClass = class
-    d.isShotAvailable = function(shot) return shot ~= HEADLAND end
+    d.isShotAvailable = function(shot) return shot ~= HEADLAND and not DroneCamDirector.getIsMulti(shot) end
     d.isShotStillUsable = function(shot)
         if shot == S.SHOT_DRIVE_OVER then return d.shotTime < 12 end
         return true
@@ -3179,7 +3227,7 @@ print("\n-- field size: a change of field waits for the next loop --")
 local switcher = DroneCamDirector.new(settings)
 switcher.random = makeWH(99)
 switcher.fieldClass = "small"
-switcher.isShotAvailable = function(shot) return shot ~= HEADLAND and shot ~= S.SHOT_DRIVE_OVER end
+switcher.isShotAvailable = function(shot) return shot ~= HEADLAND and shot ~= S.SHOT_DRIVE_OVER and not DroneCamDirector.getIsMulti(shot) end
 switcher:start(nil, 0, true)
 check("starts on the small-field story", switcher.story == DroneCamDirector.STORIES.small)
 -- Into the second step, then the field changes.
@@ -3397,6 +3445,419 @@ job.active = false
 DroneCam.settings.mode = CHASE
 VEHICLE_SPEED = 8
 driveVehicle(plainVehicle)
+end)()
+
+------------------------------------------------------------ multi-vehicle
+
+-- In a function of its own: Lua 5.1 allows only 200 locals per function.
+;(function()
+local camera = DroneCam.camera
+local cn = camera:getCameraNode()
+local S = DroneCamSettings
+local TWO, PAN, UNLOAD = S.SHOT_TWO_SHOT, S.SHOT_PAN_ACROSS, S.SHOT_UNLOADING
+local function says(text, part) return tostring(text):find(part, 1, true) ~= nil end
+
+local HAULER = { width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels,
+                 implements = { { along = -8, width = 2.5, length = 6, height = 3, noWork = true,
+                                  specs = { spec_trailer = {} } } } }
+
+---Another vehicle, driving on its own.
+local function makeOther(spec, x, z, hd, speed, working)
+    local o = makeRig(spec)
+    o.test = { x = x, z = z, heading = hd or 0, speed = speed or 0, working = working }
+    o.start = { x = x, z = z, heading = hd or 0 }
+    function o:getIsEntered() return false end
+    placeOther(o, 0)
+    return o
+end
+
+---A combine with a pipe on its left, 6.5m out and 1.5m ahead.
+local function equipCombine(c)
+    c.spec_combine = { isFilling = true }
+    local pipe = newNode("pipe")
+    c.attached[#c.attached + 1] = { node = pipe, across = -6.5, up = 4.5, along = 1.5 }
+    c.pipe = { node = pipe, isEffectActive = false }
+    c.spec_dischargeable = {}
+    function c:getCurrentDischargeNode() return self.pipe end
+    return c
+end
+
+---Lands, puts the filmed vehicle at (0, 0) heading north and gets the drone
+---flying in the given mode.
+local function film(v, mode, speed)
+    if v.spec_workArea == nil or #v.spec_workArea.workAreas == 0 then
+        v.spec_workArea = { workAreas = { { lastProcessingTime = -10000 } } }
+    end
+    vehicle = v
+    VEHICLE_SPEED = speed or 3
+    tick(12, false)
+    nodes[v.rootNode].x, nodes[v.rootNode].z = 0, 0
+    heading = 0
+    DroneCam.settings.mode = mode
+    -- Everyone back on their marks (they kept driving while the drone landed).
+    for _, o in ipairs(OTHERS) do
+        o.test.x, o.test.z, o.test.heading = o.start.x, o.start.z, o.start.heading
+        placeOther(o, 0)
+    end
+    tick(4, true)
+end
+
+local function available(shot)
+    camera.planCache = {}
+    return camera:getIsShotAvailable(shot)
+end
+
+---Angle (degrees) between the camera's view and the direction to a point.
+local function offView(x, y, z)
+    local cx, cy, cz = getWorldTranslation(cn)
+    local dx, dy, dz = localDirectionToWorld(cn, 0, 0, -1)
+    local vx, vy, vz = x - cx, y - cy, z - cz
+    local len = math.max(math.sqrt(vx * vx + vy * vy + vz * vz), 1e-6)
+    return math.deg(math.acos(math.min(math.max((dx * vx + dy * vy + dz * vz) / len, -1), 1)))
+end
+
+local function aimOf(v)
+    local x, y, z = getWorldTranslation(v.rootNode)
+    return x, y + DroneCamCamera.LOOK_HEIGHT_OFFSET, z
+end
+
+---Half the horizontal field of view (16:9) for the lens as it is now.
+local function halfWidthFov()
+    local v = math.rad(camera.appliedFov or DroneCam.settings.fov)
+    return math.deg(math.atan(math.tan(v / 2) * 16 / 9))
+end
+
+---Smallest distance from the camera to any footprint of the given vehicles
+---that it is not above (their size boxes, taken as solid up to their height).
+local function closestTo(list)
+    local cx, cy, cz = getWorldTranslation(cn)
+    local best = math.huge
+    for _, v in ipairs(list) do
+        for _, box in ipairs(DroneCamRig.getVehicleBoxes(v)) do
+            local dx, dz = cx - box.cx, cz - box.cz
+            local along = math.max(math.abs(dx * box.fx + dz * box.fz) - box.halfLength, 0)
+            local across = math.max(math.abs(dx * box.sx + dz * box.sz) - box.halfWidth, 0)
+            local up = math.max(cy - (box.ground + box.height), 0)
+            best = math.min(best, math.sqrt(along * along + across * across + up * up))
+        end
+    end
+    return best
+end
+
+print("\n-- multi-vehicle: nobody else about --")
+FIELD, OBSTACLES, OTHERS = nil, {}, {}
+CROP_AT = function() return 0, 0 end
+film(makeRig(HAULER), AUTO_RANDOM)
+check("no other vehicles: no two-shot, pan across or unloading",
+      not available(TWO) and not available(PAN) and not available(UNLOAD))
+RENDERED = {}
+DroneCam.settings.showDebug = true
+DroneCam:draw()
+check("the overlay says nobody else is working the field", says(table.concat(RENDERED, "\n"), "Other vehicles: none working this field"))
+DroneCam.settings.showDebug = false
+
+print("\n-- multi-vehicle: two-shot --")
+-- A tractor and trailer, a combine working 40m to its west, both heading north.
+FIELD = { -100, 100, -300, 3000 }
+local combine = equipCombine(makeOther(COMBINE, -40, 0, 0, 3, true))
+OTHERS = { combine }
+film(makeRig(HAULER), AUTO_RANDOM)
+tick(1.5, true)
+check("a combine working 40m away: two-shot offered", available(TWO))
+check("no pan across: the trailer is not heading for it", not available(PAN))
+RENDERED = {}
+DroneCam.settings.showDebug = true
+DroneCam:draw()
+check("the overlay lists it", says(table.concat(RENDERED, "\n"), "Other vehicles: 1 working this field (combine 40m)"),
+      table.concat(RENDERED, " | "))
+DroneCam.settings.showDebug = false
+
+-- In another field: not working together.
+FIELD = { -20, 20, -300, 3000 }
+tick(1.5, true)
+check("the same combine in the next field: no two-shot", not available(TWO))
+FIELD = { -100, 100, -300, 3000 }
+tick(1.5, true)
+check("back in the same field: offered again", available(TWO))
+
+DroneCam.settings.multiVehicle = false
+check("multi-vehicle shots switched off: not offered", not camera.director:getIsAvailable(TWO))
+DroneCam.settings.multiVehicle = true
+
+-- A tractor on an AutoDrive job counts as working, even standing still.
+local autoDriven = makeOther(HAULER, -40, 0, 0, 0, false)
+autoDriven.ad = { stateModule = { isActive = function() return true end } }
+OTHERS = { autoDriven }
+tick(1.5, true)
+check("a tractor standing on an AutoDrive job: counted, two-shot offered", available(TWO))
+autoDriven.ad = nil
+tick(1.5, true)
+check("the same tractor parked: not counted", not available(TWO))
+OTHERS = { combine }
+tick(1.5, true)
+
+camera.director:cutTo(TWO)
+camera.director.shotLength = 600
+local two = { worst = 0, closest = math.huge, maxStep = 0, maxTurn = 0, frames = 0 }
+local px, py, pz = getWorldTranslation(cn)
+local prx, pry = nodes[cn].rx, nodes[cn].ry
+tick(14, true, 0, function()
+    local x, y, z = getWorldTranslation(cn)
+    two.maxStep = math.max(two.maxStep, math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2))
+    two.maxTurn = math.max(two.maxTurn, math.deg(math.abs(nodes[cn].rx - prx)), math.deg(math.abs(wrapAngle(nodes[cn].ry - pry))))
+    px, py, pz, prx, pry = x, y, z, nodes[cn].rx, nodes[cn].ry
+    if camera.shot == TWO and camera.fromPose == nil then
+        two.frames = two.frames + 1
+        local hx, hy, hz = aimOf(vehicle)
+        local kx, ky, kz = aimOf(combine)
+        two.worst = math.max(two.worst, offView(hx, hy, hz), offView(kx, ky, kz))
+        two.closest = math.min(two.closest, closestTo({ vehicle, combine }))
+    end
+end)
+print(("        two-shot: %d frames, worst %.1f deg off centre (half width %.1f), %.1fm from either vehicle")
+      :format(two.frames, two.worst, halfWidthFov(), two.closest))
+check("two-shot holds", camera.shot == TWO and two.frames > 300)
+check("both vehicles in frame every frame", two.worst < halfWidthFov() - 3, ("%.1f deg"):format(two.worst))
+check("well clear of both", two.closest > 10, ("%.1fm"):format(two.closest))
+check("glides in and follows them smoothly", two.maxStep < MAX_STEP and two.maxTurn < MAX_TURN,
+      ("%.2fm / %.2f deg"):format(two.maxStep, two.maxTurn))
+-- The combine heads off out of the field: the shot ends.
+combine.test.x = -2000
+tick(2, true)
+check("the other vehicle leaves: the two-shot ends", camera.shot ~= TWO, tostring(camera.shot))
+
+print("\n-- multi-vehicle: pan across --")
+-- The player in a combine harvesting north; a tractor and trailer 100m off
+-- to the north-west driving straight for it.
+FIELD = { -200, 200, -300, 3000 }
+local filmedCombine = equipCombine(makeRig(COMBINE))
+local hauler = makeOther(HAULER, -80, 60, math.atan2(80, -60), 6, false)
+OTHERS = { hauler }
+film(filmedCombine, AUTO_RANDOM, 2)
+tick(1.5, true)
+check("a trailer coming to the combine: pan across offered", available(PAN))
+camera.director:cutTo(PAN)
+camera.director.shotLength = 9
+local pan = { startOff = nil, endOff = nil, moved = 0, maxTurn = 0, jerk = 0, closest = math.huge }
+local lastPos, lastTurn, lastDir = nil, nil, nil
+local panStart = nil
+tick(8.5, true, 0, function()
+    if camera.shot ~= PAN or camera.plan == nil then return end
+    local x, y, z = getWorldTranslation(cn)
+    if camera.fromPose == nil then
+        if lastPos ~= nil then
+            pan.moved = math.max(pan.moved, math.sqrt((x - lastPos[1]) ^ 2 + (y - lastPos[2]) ^ 2 + (z - lastPos[3]) ^ 2))
+        end
+        lastPos = { x, y, z }
+        panStart = panStart or camera.shotElapsed
+        local cx, cy, cz = aimOf(filmedCombine)
+        local hx, hy, hz = aimOf(hauler)
+        if camera.shotElapsed - panStart < 1.2 then
+            pan.startOff = math.max(pan.startOff or 0, offView(cx, cy, cz))
+        end
+        pan.endOff = offView(hx, hy, hz)
+        local dx, dy, dz = localDirectionToWorld(cn, 0, 0, -1)
+        if lastDir ~= nil then
+            local turn = math.deg(math.acos(math.min(math.max(dx * lastDir[1] + dy * lastDir[2] + dz * lastDir[3], -1), 1)))
+            pan.maxTurn = math.max(pan.maxTurn, turn)
+            if lastTurn ~= nil then pan.jerk = math.max(pan.jerk, math.abs(turn - lastTurn)) end
+            lastTurn = turn
+        end
+        lastDir = { dx, dy, dz }
+        pan.closest = math.min(pan.closest, closestTo({ vehicle, hauler }))
+    end
+end)
+print(("        pan across: on the combine to %.1f deg, ends %.1f deg off the trailer, turn %.2f deg/frame"):format(
+      pan.startOff or -1, pan.endOff or -1, pan.maxTurn))
+check("starts on the combine", pan.startOff ~= nil and pan.startOff < 3, tostring(pan.startOff))
+check("ends on the tractor and trailer coming to it", pan.endOff ~= nil and pan.endOff < 3, tostring(pan.endOff))
+check("from a fixed spot", pan.moved < 0.01, ("%.3fm in a frame"):format(pan.moved))
+check("pans smoothly", pan.maxTurn < 1.5 and pan.jerk < 0.2, ("%.2f deg, %.3f deg"):format(pan.maxTurn, pan.jerk))
+check("clear of both vehicles", pan.closest > 10, ("%.1fm"):format(pan.closest))
+
+print("\n-- multi-vehicle: unloading --")
+-- The player in a combine harvesting north in story mode; a tractor and
+-- trailer driving alongside under the pipe, on its left (the pipe's end
+-- over the front of the trailer, 4.5m from its middle).
+local unloader = equipCombine(makeRig(COMBINE))
+local alongside = makeOther(HAULER, -7, 14, 0, 3, false)
+OTHERS = { alongside }
+film(unloader, AUTO, 3)
+camera.director.random = makeRng(99)
+tick(3, true)
+check("not unloading yet: no unloading shot", not available(UNLOAD) and camera.shot ~= UNLOAD)
+local stepBefore = camera.director.storyStep
+unloader.pipe.isEffectActive = true
+local switchedAfter = nil
+local t0 = g_currentMission.time
+tick(2.5, true, 0, function()
+    if switchedAfter == nil and camera.director.shot == UNLOAD then switchedAfter = (g_currentMission.time - t0) / 1000 end
+end)
+check("the pipe starts: the story switches to the unloading shot", switchedAfter ~= nil and switchedAfter < 1.5,
+      tostring(switchedAfter))
+check("without moving the story on", camera.director.storyStep == stepBefore)
+
+local un = { worstCombine = 0, worstTrailer = 0, farSide = true, lowest = math.huge, closest = math.huge, frames = 0,
+             maxStep = 0 }
+local lx, ly, lz = getWorldTranslation(cn)
+tick(40, true, 0, function()
+    local x, y, z = getWorldTranslation(cn)
+    un.maxStep = math.max(un.maxStep, math.sqrt((x - lx) ^ 2 + (y - ly) ^ 2 + (z - lz) ^ 2))
+    lx, ly, lz = x, y, z
+    if camera.shot ~= UNLOAD or camera.fromPose ~= nil then return end
+    un.frames = un.frames + 1
+    local cx, cy, cz = aimOf(unloader)
+    local trailer = DroneCamPeers.getLoadCarrier(alongside)
+    local tx, ty, tz = getWorldTranslation(trailer.rootNode)
+    un.worstCombine = math.max(un.worstCombine, offView(cx, cy, cz))
+    un.worstTrailer = math.max(un.worstTrailer, offView(tx, ty + 1.5, tz))
+    if (x - tx) * (tx - cx) + (z - tz) * (tz - cz) <= 0 then un.farSide = false end
+    un.lowest = math.min(un.lowest, y - TERRAIN_HEIGHT)
+    un.closest = math.min(un.closest, closestTo({ vehicle, alongside }))
+end)
+print(("        unloading: %d frames, combine %.1f / trailer %.1f deg off centre, lowest %.1fm, %.1fm from either")
+      :format(un.frames, un.worstCombine, un.worstTrailer, un.lowest, un.closest))
+check("holds for as long as unloading lasts (40s, well past a normal shot)", camera.shot == UNLOAD and un.frames > 2000)
+check("from the far side of the trailer", un.farSide)
+check("a little above both (the combine is 4m tall)", un.lowest >= 4 + 3 - 0.5, ("%.1fm"):format(un.lowest))
+check("both in frame", un.worstCombine < halfWidthFov() - 3 and un.worstTrailer < halfWidthFov() - 3,
+      ("%.1f / %.1f deg"):format(un.worstCombine, un.worstTrailer))
+check("never touches either vehicle", un.closest > 2, ("%.1fm"):format(un.closest))
+check("tracks alongside smoothly", un.maxStep < MAX_STEP, ("%.2fm"):format(un.maxStep))
+
+unloader.pipe.isEffectActive = false
+tick(1, true)
+check("a short pause in the pipe does not end it", camera.shot == UNLOAD)
+tick(2.5, true)
+check("unloading over: back to the story", camera.shot ~= UNLOAD and camera.director.shot ~= UNLOAD, tostring(camera.shot))
+
+-- Starting to unload in a headland turn: not until straight again.
+tick(3, true)
+local turnSwitch = nil
+unloader.pipe.isEffectActive = true
+alongside.test.turnRate = math.rad(30) -- turning with the combine, still under the pipe
+tick(3, true, math.rad(30), function()
+    if turnSwitch == nil and camera.director.shot == UNLOAD then turnSwitch = true end
+end)
+alongside.test.turnRate = 0
+-- The driver brings the trailer back under the pipe on the new line.
+do
+    local cx, _, cz = getWorldTranslation(unloader.rootNode)
+    alongside.test.x = cx + math.cos(heading) * -7 + math.sin(heading) * 14
+    alongside.test.z = cz - math.sin(heading) * -7 + math.cos(heading) * 14
+    alongside.test.heading = heading
+    placeOther(alongside, 0)
+end
+check("not in the middle of a headland turn", turnSwitch == nil)
+local straightFor = nil
+local t1 = g_currentMission.time
+tick(3.5, true, 0, function()
+    if straightFor == nil and camera.director.shot == UNLOAD then straightFor = (g_currentMission.time - t1) / 1000 end
+end)
+check("but once settled on the new line, like any other change", straightFor ~= nil
+      and straightFor >= DroneCamDirector.STRAIGHT_SETTLE_TIME - 0.6 and straightFor < 3, tostring(straightFor))
+unloader.pipe.isEffectActive = false
+tick(3, true)
+
+-- Random mode: it is one shot among the others, not forced.
+DroneCam.settings.mode = AUTO_RANDOM
+tick(2, true)
+camera.director:cutTo(MODE_CHASE or S.MODE_CHASE)
+camera.director.shotLength = 600
+unloader.pipe.isEffectActive = true
+tick(3, true)
+check("random mode: unloading does not take over", camera.director.shot ~= UNLOAD)
+check("but is offered", available(UNLOAD))
+unloader.pipe.isEffectActive = false
+tick(3, true)
+
+-- Switched off: the story never switches to it.
+DroneCam.settings.mode = AUTO
+DroneCam.settings.multiVehicle = false
+tick(2, true)
+unloader.pipe.isEffectActive = true
+tick(3, true)
+check("multi-vehicle off: no unloading shot", camera.director.shot ~= UNLOAD)
+unloader.pipe.isEffectActive = false
+DroneCam.settings.multiVehicle = true
+
+print("\n-- multi-vehicle: the director --")
+-- Another vehicle working: the story's opening and second steps play the
+-- two-shot and the pan across about half the time.
+local multiDir = DroneCamDirector.new(DroneCam.settings)
+multiDir.random = makeRng(2024)
+multiDir.isShotAvailable = function(shot)
+    return shot ~= S.SHOT_HEADLAND and shot ~= S.SHOT_DRIVE_OVER and shot ~= UNLOAD
+end
+multiDir:start(nil, 0, true)
+local opens, twos, seconds, pans = 0, 0, 0, 0
+local lastShot, lastStep = multiDir.shot, multiDir.storyStep
+for _ = 1, math.floor(3000 / 0.1) do
+    local before = multiDir.storyStep
+    multiDir:update(0.1, 0)
+    if multiDir.shot ~= lastShot then
+        if before == 1 then
+            opens = opens + 1
+            if multiDir.shot == TWO then twos = twos + 1 end
+        elseif before == 2 then
+            seconds = seconds + 1
+            if multiDir.shot == PAN then pans = pans + 1 end
+        end
+        lastShot = multiDir.shot
+    end
+end
+print(("        two-shot %d of %d openings, pan across %d of %d second steps"):format(twos, opens, pans, seconds))
+check("two-shot opens about half the loops", opens > 20 and twos / opens > 0.3 and twos / opens < 0.7)
+check("pan across in about half the second steps", seconds > 20 and pans / seconds > 0.3 and pans / seconds < 0.7)
+
+-- Unloading starts mid-shot: straight to it, unless the camera is on the
+-- ground in a vehicle's path; then the story carries on from the same step.
+local unloadingNow, grounded = false, false
+local prio = DroneCamDirector.new(DroneCam.settings)
+prio.random = makeRng(77)
+prio.isShotAvailable = function(shot)
+    if shot == UNLOAD then return unloadingNow end
+    return shot ~= S.SHOT_HEADLAND and shot ~= S.SHOT_DRIVE_OVER and not DroneCamDirector.getIsMulti(shot)
+end
+prio.isShotStillUsable = function(shot)
+    if shot == UNLOAD then return unloadingNow end
+    return true
+end
+prio.canInterrupt = function() return not grounded end
+prio:start(nil, 0, true)
+for _ = 1, 50 do prio:update(0.1, 0) end
+local step = prio.storyStep
+grounded, unloadingNow = true, true
+for _ = 1, 30 do prio:update(0.1, 0) end
+check("not while the camera is on the ground in a vehicle's path", prio.shot ~= UNLOAD)
+grounded = false
+prio:update(0.1, 0)
+check("straight away once it can", prio.shot == UNLOAD)
+for _ = 1, 600 do prio:update(0.1, 0) end
+check("held for as long as it lasts (a minute here)", prio.shot == UNLOAD)
+unloadingNow = false
+prio:update(0.1, 0)
+check("then the story carries on where it was", prio.shot ~= UNLOAD and prio.storyStep ~= nil
+      and (prio.storyStep == step % #prio.story.steps + 1 or prio.storyStep == step),
+      ("step %d then %d"):format(step, prio.storyStep))
+
+print("\n-- multi-vehicle: other vehicles are solid --")
+-- A parked tractor and trailer beside the filmed one: the floors keep the
+-- camera over it.
+local parked = makeOther(HAULER, 12, 0, 0, 0, false)
+OTHERS = { parked }
+film(makeRig(HAULER), S.MODE_CHASE)
+tick(1, true)
+local px2, _, pz2 = getWorldTranslation(parked.rootNode)
+local floor = camera:getOthersFloor(px2, pz2)
+check("the floor over another vehicle is above its roof", floor >= TERRAIN_HEIGHT + 3 + DroneCamRig.HARD_MARGIN - 0.01,
+      ("%.2f"):format(floor))
+check("and nothing far from any", camera:getOthersFloor(px2 + 200, pz2) == -math.huge)
+
+OTHERS = {}
+FIELD = nil
+DroneCam.settings.mode = S.MODE_CHASE
+tick(12, false)
 end)()
 
 print("\n-- settings round trip --")

@@ -52,6 +52,11 @@ DroneCamSettings.SHOT_WHEEL_PASS = 222
 -- Lower and closer than the chase angle, held between passes in drive-over mode.
 DroneCamSettings.SHOT_LOW_CHASE = 223
 
+-- Shots with more than one vehicle in them (DroneCamMulti).
+DroneCamSettings.SHOT_TWO_SHOT = 231
+DroneCamSettings.SHOT_PAN_ACROSS = 232
+DroneCamSettings.SHOT_UNLOADING = 233
+
 DroneCamSettings.MODE_L10N = {
     [DroneCamSettings.MODE_CHASE] = "droneCam_mode_chase",
     [DroneCamSettings.MODE_TOPDOWN] = "droneCam_mode_topDown",
@@ -100,7 +105,8 @@ DroneCamSettings.SCHEMA = {
     { "followAI",        "bool",  false },
     { "sway",            "bool",  true },
     { "swayAmplitude",   "float", 0.4,   0,   3 },
-    { "hideHud",         "bool",  false }
+    { "hideHud",         "bool",  false },
+    { "multiVehicle",    "bool",  true }
 }
 
 ---Creates a settings table populated with the defaults from the schema.

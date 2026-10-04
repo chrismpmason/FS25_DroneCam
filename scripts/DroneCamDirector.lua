@@ -44,10 +44,18 @@ DroneCamDirector.HERO_SHOTS = { S.SHOT_DRIVE_OVER }
 ---Longest a hero shot may run before the director takes over regardless.
 DroneCamDirector.HERO_MAX_TIME = 45
 
+---Shots with another vehicle in them (DroneCamMulti), offered only while one
+---is working the same field. The unloading shot is apart: in the story it
+---takes over whenever a combine starts unloading.
+DroneCamDirector.MULTI_SHOTS = { S.SHOT_TWO_SHOT, S.SHOT_PAN_ACROSS }
+
+---The unloading shot holds for as long as unloading lasts, up to this long.
+DroneCamDirector.UNLOADING_MAX_TIME = 300
+
 ---Everything that is not a close-up, for random mode's wide/close mix.
 DroneCamDirector.WIDE_SHOTS = {}
 for _, list in ipairs({ DroneCamDirector.STATIC_WIDE_SHOTS, DroneCamDirector.FIXED_SHOTS, DroneCamDirector.MOVING_SHOTS,
-                        DroneCamDirector.HERO_SHOTS }) do
+                        DroneCamDirector.HERO_SHOTS, DroneCamDirector.MULTI_SHOTS, { S.SHOT_UNLOADING } }) do
     for _, shot in ipairs(list) do
         DroneCamDirector.WIDE_SHOTS[#DroneCamDirector.WIDE_SHOTS + 1] = shot
     end
@@ -73,6 +81,15 @@ DroneCamDirector.STORY = {
 ---three the drive-over plays in place of the fly-over (when it can).
 DroneCamDirector.HERO_STEP = 4
 DroneCamDirector.HERO_CHANCE = 1 / 3
+
+---While another vehicle is working the field, the story shows it now and
+---then: the two-shot in place of the opening step, the pan across in place
+---of the second, each about half the time it can be done.
+DroneCamDirector.STORY_MULTI = {
+    [1] = { S.SHOT_TWO_SHOT },
+    [2] = { S.SHOT_PAN_ACROSS }
+}
+DroneCamDirector.MULTI_CHANCE = 0.5
 
 ---Chance a story step plays its usual shot rather than a stand-in.
 DroneCamDirector.STORY_USUAL_CHANCE = 0.65
@@ -171,6 +188,11 @@ function DroneCamDirector.getIsHero(shot)
     return contains(DroneCamDirector.HERO_SHOTS, shot)
 end
 
+---@return boolean @True for the shots with another vehicle in them
+function DroneCamDirector.getIsMulti(shot)
+    return shot == S.SHOT_UNLOADING or contains(DroneCamDirector.MULTI_SHOTS, shot)
+end
+
 ---@param settings DroneCamSettings
 ---@return DroneCamDirector
 function DroneCamDirector.new(settings)
@@ -184,6 +206,9 @@ function DroneCamDirector.new(settings)
     -- isShotStillUsable whether the one on screen can carry on.
     self.isShotAvailable = nil
     self.isShotStillUsable = nil
+    -- And canInterrupt whether the shot on screen may be cut away from now
+    -- (not with the camera on the ground in a vehicle's path).
+    self.canInterrupt = nil
 
     self:reset()
 
@@ -214,7 +239,15 @@ function DroneCamDirector:getIsAvailable(shot)
     if DroneCamDirector.getIsCloseUp(shot) and not self.settings.closeUps then
         return false
     end
+    if DroneCamDirector.getIsMulti(shot) and not self.settings.multiVehicle then
+        return false
+    end
     return self.isShotAvailable == nil or self.isShotAvailable(shot)
+end
+
+---@return boolean @False while the shot on screen must not be cut away from
+function DroneCamDirector:getCanInterrupt(shot)
+    return self.canInterrupt == nil or self.canInterrupt(shot)
 end
 
 ---@return boolean
@@ -279,9 +312,12 @@ function DroneCamDirector:pickShotLength(shot)
     if DroneCamDirector.getIsHero(shot) then
         -- Runs until the camera reports it finished (see getIsStillUsable).
         return DroneCamDirector.HERO_MAX_TIME
+    elseif shot == S.SHOT_UNLOADING then
+        -- For as long as unloading lasts (see getIsStillUsable).
+        return DroneCamDirector.UNLOADING_MAX_TIME
     elseif DroneCamDirector.getIsCloseUp(shot) then
         minLength, maxLength = settings.closeUpMinShot, settings.closeUpMaxShot
-    elseif DroneCamDirector.getIsMoving(shot) then
+    elseif DroneCamDirector.getIsMoving(shot) or shot == S.SHOT_PAN_ACROSS then
         minLength, maxLength = settings.movingMinShot, settings.movingMaxShot
     else
         minLength, maxLength = settings.directorMinShot, settings.directorMaxShot
@@ -354,6 +390,13 @@ function DroneCamDirector:pickStoryShot()
             and self:pickFrom(DroneCamDirector.HERO_SHOTS) ~= nil then
             -- This loop's hero shot, in place of the usual step.
             local shot = self:pickFrom(DroneCamDirector.HERO_SHOTS)
+            self:advanceStory()
+            return shot
+        elseif DroneCamDirector.STORY_MULTI[self.storyStep] ~= nil
+            and self:pickFrom(DroneCamDirector.STORY_MULTI[self.storyStep]) ~= nil
+            and self.random() < DroneCamDirector.MULTI_CHANCE then
+            -- Another vehicle is working the field: show it.
+            local shot = self:pickFrom(DroneCamDirector.STORY_MULTI[self.storyStep])
             self:advanceStory()
             return shot
         else
@@ -459,6 +502,11 @@ function DroneCamDirector:update(dtSeconds, heading)
         if DroneCamDirector.getIsCloseUp(self.shot) then
             self:cutTo(self:pickNextShot(true))
         end
+    elseif self.isStory and self.shot ~= S.SHOT_UNLOADING and self.straightTime >= DroneCamDirector.STRAIGHT_SETTLE_TIME
+        and self:getCanInterrupt(self.shot) and self:getIsAvailable(S.SHOT_UNLOADING) then
+        -- A combine has started unloading: that comes first in the story.
+        -- The story picks up where it left off once it is over.
+        self:cutTo(S.SHOT_UNLOADING)
     elseif self.shotTime >= self.shotLength and self.straightTime >= DroneCamDirector.STRAIGHT_SETTLE_TIME then
         self:cutTo(self:pickNextShot(false))
     elseif not self:getIsStillUsable(self.shot) then

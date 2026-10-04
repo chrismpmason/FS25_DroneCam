@@ -149,6 +149,14 @@ function DroneCamCamera.new(settings)
     self.director.isShotStillUsable = function(shot)
         return self:getIsShotStillUsable(shot)
     end
+    self.director.canInterrupt = function()
+        -- Never away from a camera on the ground in a vehicle's path.
+        return not DroneCamCreator.getIsDriveOverGrounded(self)
+    end
+
+    -- The other vehicles around: for the multi-vehicle shots, and to keep
+    -- the camera out of them.
+    self.peers = DroneCamPeers.new()
 
     self.frameId = 0
     self.vehicleSpeed = 0
@@ -246,6 +254,7 @@ function DroneCamCamera:activate(fromNode, vehicle)
     self.blendOutActive = false
     self:resetTracking()
     self:resetShot()
+    self.peers:reset()
 
     local seeded = false
 
@@ -937,7 +946,11 @@ DroneCamCamera.STATIONARY_SHOTS = {
     [DroneCamSettings.MODE_TOPDOWN] = true,
     [DroneCamSettings.MODE_ORBIT] = true,
     [DroneCamSettings.SHOT_ESTABLISHING] = true,
-    [DroneCamSettings.SHOT_LONG_LENS] = true
+    [DroneCamSettings.SHOT_LONG_LENS] = true,
+    -- A combine often stands still to unload, or waits for the trailer.
+    [DroneCamSettings.SHOT_TWO_SHOT] = true,
+    [DroneCamSettings.SHOT_PAN_ACROSS] = true,
+    [DroneCamSettings.SHOT_UNLOADING] = true
 }
 
 ---Plain names for the debug overlay.
@@ -961,7 +974,10 @@ DroneCamCamera.SHOT_NAMES = {
     [DroneCamSettings.SHOT_SLIDE] = "slide",
     [DroneCamSettings.SHOT_DRIVE_OVER] = "drive-over",
     [DroneCamSettings.SHOT_WHEEL_PASS] = "wheel pass",
-    [DroneCamSettings.SHOT_LOW_CHASE] = "low chase"
+    [DroneCamSettings.SHOT_LOW_CHASE] = "low chase",
+    [DroneCamSettings.SHOT_TWO_SHOT] = "two-shot",
+    [DroneCamSettings.SHOT_PAN_ACROSS] = "pan across",
+    [DroneCamSettings.SHOT_UNLOADING] = "unloading"
 }
 
 ---The debug overlay's drive-over check is repeated this often, not every
@@ -1028,6 +1044,7 @@ function DroneCamCamera:getDebugLines()
     if self.undersideNote ~= nil then
         lines[#lines + 1] = "Underside: " .. self.undersideNote
     end
+    lines[#lines + 1] = "Other vehicles: " .. self.peers:describe()
     lines[#lines + 1] = "Drive-over: " .. tostring(self.debugDriveOver or "checking...")
     if plan ~= nil and DroneCamCreator.getIsGroundPass(plan.shot) and plan.lostReason ~= nil then
         lines[#lines + 1] = "Last " .. DroneCamCamera.SHOT_NAMES[plan.shot] .. " dropped: " .. plan.lostReason
@@ -1371,6 +1388,29 @@ end
 ---No vehicle reaches this high, so above it the rig is not even measured.
 DroneCamCamera.VEHICLE_CHECK_HEIGHT = 10
 
+---Lowest height the camera may have at (x, z) to stay out of the other
+---vehicles nearby (DroneCamPeers.BOX_RADIUS), measured once a frame.
+---@return number
+function DroneCamCamera:getOthersFloor(x, z)
+    local nearby = self.peers.nearby
+    if #nearby == 0 then
+        return -math.huge
+    end
+    if self.othersFrame ~= self.frameId then
+        self.othersFrame = self.frameId
+        local boxes = {}
+        for _, other in ipairs(nearby) do
+            if other.rootNode ~= nil and entityExists(other.rootNode) then
+                for _, box in ipairs(DroneCamRig.getVehicleBoxes(other)) do
+                    boxes[#boxes + 1] = box
+                end
+            end
+        end
+        self.othersRig = { boxes = boxes }
+    end
+    return DroneCamRig.getVehicleFloor(self.othersRig, x, z, true)
+end
+
 ---@return table|nil @The rig, if the position is low enough for it to matter
 function DroneCamCamera:getRigNear(vehicle, x, y, z)
     if y - getTerrainHeightAt(x, z) > DroneCamCamera.VEHICLE_CHECK_HEIGHT then
@@ -1444,6 +1484,7 @@ function DroneCamCamera:applyHardFloors(vehicle, isGroundLow, isUnderVehicle)
 
     if rig ~= nil then
         self.posY = math.max(self.posY, DroneCamRig.getVehicleFloor(rig, self.posX, self.posZ, true, isUnderVehicle))
+        self.posY = math.max(self.posY, self:getOthersFloor(self.posX, self.posZ))
     end
 end
 
@@ -1529,9 +1570,11 @@ function DroneCamCamera:update(dt, vehicle)
 
         self:updateField(dtSeconds, vehicle)
         self:updateModeTurning(dtSeconds, targetHeading)
+        self.peers:update(dtSeconds, vehicle)
         self:updateShot(dtSeconds, vehicle, targetHeading)
         DroneCamCreator.updateDriveOver(self, dtSeconds, vehicle)
         DroneCamCreator.updateWheelPass(self, dtSeconds, vehicle)
+        DroneCamMulti.update(self, dtSeconds, vehicle)
         self:updateDebug(dtSeconds, vehicle)
 
         -- On the ground for a drive-over the camera is placed to the
@@ -1574,6 +1617,7 @@ function DroneCamCamera:update(dt, vehicle)
         local rig = self:getRigNear(vehicle, desiredPosX, desiredPosY, desiredPosZ)
         if rig ~= nil then
             desiredPosY = math.max(desiredPosY, DroneCamRig.getVehicleFloor(rig, desiredPosX, desiredPosZ, true, isDriveOverLow))
+            desiredPosY = math.max(desiredPosY, self:getOthersFloor(desiredPosX, desiredPosZ))
         end
     end
 
@@ -1611,11 +1655,15 @@ function DroneCamCamera:update(dt, vehicle)
     -- rig, so nothing trails behind however fast the vehicle goes. The hold
     -- starts with the glide in (which sets off from exactly where the camera
     -- is, so there is nothing to catch up) and eases in over
-    -- WHEEL_PASS_LOCK_TIME, so the camera never lags on arrival either.
+    -- WHEEL_PASS_LOCK_TIME, so the camera never lags on arrival either. The
+    -- pan across is held the same way: a fixed spot, the view panning
+    -- exactly from the combine to the trailer as it comes.
     local isWheelPassLow = isGroundLow and self.shot == DroneCamSettings.SHOT_WHEEL_PASS
     local isWheelPassHeld = not isBlendingOut and self.shot == DroneCamSettings.SHOT_WHEEL_PASS
         and DroneCamCreator.getIsDriveOverGrounded(self)
-    if isWheelPassHeld then
+    local isPanHeld = not isBlendingOut and self.shot == DroneCamSettings.SHOT_PAN_ACROSS
+        and self.plan ~= nil and self.plan.shot == self.shot and not self.plan.isLost
+    if isWheelPassHeld or isPanHeld then
         self.wheelPassLock = math.min((self.wheelPassLock or 0) + dtSeconds / DroneCamCamera.WHEEL_PASS_LOCK_TIME, 1)
         local lock = smoothstep(self.wheelPassLock)
         posAlpha = lerp(posAlpha, 1, lock)

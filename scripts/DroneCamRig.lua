@@ -296,6 +296,25 @@ function DroneCamRig.measure(vehicle, heading)
     return rig
 end
 
+---Footprints of a whole combination (another vehicle nearby), as boxes, for
+---keeping the camera out of it. Nothing else is measured.
+---@return table
+function DroneCamRig.getVehicleBoxes(vehicle)
+    local boxes = {}
+    local children = vehicle.getChildVehicles ~= nil and vehicle:getChildVehicles() or { vehicle }
+    for i = 1, #children do
+        local child = children[i]
+        if child.rootNode ~= nil and entityExists(child.rootNode) then
+            local box = getVehicleBox(child)
+            if box ~= nil then
+                box.vehicle = child
+                boxes[#boxes + 1] = box
+            end
+        end
+    end
+    return boxes
+end
+
 ---Rear-most wheel on the given side of the controlled vehicle, estimated from
 ---its size if it reports no wheels.
 ---@param side number @1 or -1, in the rig's local x

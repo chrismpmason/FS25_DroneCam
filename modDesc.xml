@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="109">
     <author>The CMM Farmer</author>
-    <version>0.9.4.4</version>
+    <version>0.9.5.0</version>
     <title>
         <en>DroneCam (Beta)</en>
     </title>
@@ -25,8 +25,10 @@ Three camera modes: Chase, Top-down and Orbit. Height is clamped above the terra
         <sourceFile filename="scripts/DroneCamField.lua"/>
         <sourceFile filename="scripts/DroneCamSpot.lua"/>
         <sourceFile filename="scripts/DroneCamKit.lua"/>
+        <sourceFile filename="scripts/DroneCamPeers.lua"/>
         <sourceFile filename="scripts/DroneCamDirector.lua"/>
         <sourceFile filename="scripts/DroneCamCreator.lua"/>
+        <sourceFile filename="scripts/DroneCamMulti.lua"/>
         <sourceFile filename="scripts/DroneCamCamera.lua"/>
         <sourceFile filename="scripts/DroneCam.lua"/>
     </extraSourceFiles>

@@ -194,12 +194,13 @@ end
 ---@return boolean
 function DroneCamCreator.getIsCreatorShot(shot)
     return DroneCamDirector.getIsFixed(shot) or DroneCamDirector.getIsMoving(shot) or DroneCamDirector.getIsHero(shot)
-        or shot == S.SHOT_WHEEL_PASS
+        or shot == S.SHOT_WHEEL_PASS or DroneCamDirector.getIsMulti(shot)
 end
 
 ---@return boolean @True for shots that are planned from a fixed spot
 function DroneCamCreator.getNeedsPlan(shot)
     return DroneCamDirector.getIsFixed(shot) or DroneCamDirector.getIsHero(shot) or shot == S.SHOT_WHEEL_PASS
+        or DroneCamDirector.getIsMulti(shot)
 end
 
 ---@return number, number, number @Point on the vehicle the creator shots aim at
@@ -1005,6 +1006,12 @@ local PLANNERS = {
     [S.SHOT_DRIVE_OVER] = planDriveOver,
     [S.SHOT_WHEEL_PASS] = planWheelPass
 }
+-- The shots with another vehicle in them are planned by DroneCamMulti.
+for _, shot in ipairs({ S.SHOT_TWO_SHOT, S.SHOT_PAN_ACROSS, S.SHOT_UNLOADING }) do
+    PLANNERS[shot] = function(camera, vehicle)
+        return DroneCamMulti.plan(camera, vehicle, shot)
+    end
+end
 
 ---Drive-over mode's choice: a drive-over when what is attached allows it and
 ---the whole train clears the camera (DroneCamKit), otherwise a wheel pass.
@@ -1571,6 +1578,9 @@ end
 ---@return number, number, number, number, number, number @Position and look target
 ---@return number|nil, number|nil, number|nil @Yaw and pitch override, and its weight
 function DroneCamCreator.getTransform(camera, vehicle, shot)
+    if DroneCamDirector.getIsMulti(shot) then
+        return DroneCamMulti.getTransform(camera, vehicle, shot)
+    end
     local vx, vy, vz = getWorldTranslation(vehicle.rootNode)
     local aimX, aimY, aimZ = getVehicleAim(vehicle)
     local plan = camera.plan
@@ -1641,6 +1651,9 @@ end
 ---lowest it may go above the terrain.
 ---@return number, number
 function DroneCamCreator.getTracking(camera, shot)
+    if DroneCamDirector.getIsMulti(shot) then
+        return DroneCamMulti.getTracking(camera, shot)
+    end
     local settings = camera.settings
     local close = DroneCamCamera.CLOSEUP_CLEARANCE
 
@@ -1671,6 +1684,9 @@ end
 
 ---@return number @Field of view in degrees for a creator shot
 function DroneCamCreator.getFov(camera, vehicle, shot)
+    if DroneCamDirector.getIsMulti(shot) then
+        return DroneCamMulti.getFov(camera, vehicle, shot)
+    end
     local fov = camera.settings.fov
     local plan = camera.plan
 

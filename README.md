@@ -98,6 +98,34 @@ pull-out shots play more often, there are two close-ups, and each loop ends on a
 long lens. Medium fields, and anywhere no field is found, get the usual mix. A
 change of field takes effect at the start of the next loop.
 
+**Multi-vehicle shots.** DroneCam looks for other vehicles working the same
+field: combines, tractors with trailers or chaser bins, hired helpers,
+Courseplay and AutoDrive, and other players' vehicles in multiplayer. It
+judges from what every player can see: a vehicle working its implements, a
+pipe running, kit turned on or lowered while moving. With one about, there
+are three more shots:
+
+- **Two-shot**: a wide shot side-on to the pair, far enough off to fit both
+  in and following them as they work.
+- **Pan across**: when a tractor and trailer is heading for a combine, a
+  fixed spot off to the side holds on the combine, then pans across to the
+  trailer coming to it.
+- **Unloading**: while a combine unloads into a trailer, the camera rides
+  alongside, out past the trailer on the far side from the combine and a
+  little above both. It holds for as long as unloading lasts; a pause of
+  up to 1.5 seconds in the pipe does not end it.
+
+In story mode unloading comes first: the story switches to it whenever a
+combine starts unloading and picks up where it left off afterwards. It
+still waits out a headland turn (and the usual settling time after one),
+and never cuts into a drive-over or wheel pass with the camera on the ground.
+The two-shot stands in for the story's opening step, and the pan across for
+its second, about half the time each can be done. In random mode all three
+are part of the mix. With nobody else working the field, everything carries
+on as before. Other vehicles nearby are kept out of the camera in every shot,
+like your own. The `multiVehicle` setting in `modSettings/FS25_DroneCam.xml`
+switches all of this off.
+
 Fixed spots are checked before use: never inside or under a tree or building,
 never tight against a wall, and with a clear line of sight past terrain, trees
 and buildings to where the vehicle is and will be over the next ten seconds. A
@@ -165,8 +193,10 @@ including a drive-over that is later dropped and why, goes into `log.txt` as a
 again, even with the drone landed. It shows the shot on screen (and the
 drive-over's phase), the field and its size class, and the train as DroneCam
 sees it: each unit, its name for the allow list, whether it is lowered ("n/a"
-where that doesn't matter) and its fold state. It also gives the lowest
-collision shape underneath, and whether a drive-over is possible right now:
+where that doesn't matter) and its fold state. It also gives the other
+vehicles working the field (and whether one is unloading, or a trailer is
+coming to a combine), the lowest collision shape underneath, and whether a
+drive-over is possible right now:
 the camera height and line it would use, or why not. Underneath that are the
 last dropped pass and the last Ctrl+G result, and the camera's height with any
 obstacle lift.
@@ -210,10 +240,12 @@ scripts/DroneCam.lua             manager: state machine and input
 scripts/DroneCamCamera.lua       camera node, smoothing, angles and blends
 scripts/DroneCamDirector.lua     Auto director: story and random, timing, turn rules
 scripts/DroneCamCreator.lua      creator shots and drive-over: planning, paths, zoom
+scripts/DroneCamMulti.lua        multi-vehicle shots: two-shot, pan across, unloading
 scripts/DroneCamRig.lua          vehicle + implement measurement, vehicle floor
 scripts/DroneCamField.lua        game field lookup, size class, field edges
 scripts/DroneCamSpot.lua         fixed-spot checks: clear spot, line of sight
 scripts/DroneCamKit.lua          what is attached: drive-over rules, fold/lower watch
+scripts/DroneCamPeers.lua        other vehicles: who is working the field, unloading
 scripts/DroneCamWorkDetect.lua   field-work detection and hysteresis
 scripts/DroneCamSettings.lua     defaults and XML persistence
 test/test_dronecam.lua           offline test suite
@@ -239,7 +271,10 @@ trailers, a sprayer with its boom down and a combine with its header raised,
 checked every frame for distance to every collision body; the rule for each
 kind of implement; kit folding or lowering mid-pass; a base-game tipper and
 a mod tipper with crude box collision round its axles, and the allow list),
-combine
+the multi-vehicle shots (other vehicles found in the same field and not the
+next, framed together, the pan from combine to trailer, the unloading shot
+taking over the story and holding while it lasts, each checked every frame
+for framing, smoothness and distance from both vehicles), combine
 and hired-helper detection, settings round-tripping, and every path that must
 return the player to their own camera.
 
