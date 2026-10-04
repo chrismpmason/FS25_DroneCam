@@ -2805,6 +2805,135 @@ check("low on the ground as it passes", cult.lowestWheelPass < 0.45 and (cult.wh
 check("never inside the tractor or the implement", not cult.insideRig and cult.closest >= 0.2, ("%.2fm"):format(cult.closest))
 check("wheel pass runs through to the chase", countLogged("[DroneCam] Drive-over mode: wheel pass finished") >= 1)
 
+---Runs one wheel pass with the mounted cultivator at the given speed and
+---records how well the camera follows the rig.
+local function flyWheelPass(speed)
+    startOn(MOUNTED, 0, speed)
+    DroneCam.settings.mode = MODE_DO
+    local r = { order = {}, maxAimError = 0, maxMove = 0, framed = {}, near = {}, watchTime = 0, watchMove = 0,
+                watchOffImplement = 0, subjectAlongs = {}, done = false }
+    local lastPhase, px, py, pz = nil, nil, nil, nil
+    local function angleTo(x, y, z, tx, ty, tz)
+        local dx, dy, dz = localDirectionToWorld(cn, 0, 0, -1)
+        local vx, vy, vz = tx - x, ty - y, tz - z
+        local len = math.sqrt(vx * vx + vy * vy + vz * vz)
+        local dot = (dx * vx + dy * vy + dz * vz) / math.max(len, 1e-6)
+        return math.deg(math.acos(math.min(math.max(dot, -1), 1)))
+    end
+    tick(40, true, 0, function(dtSeconds)
+        if r.done then return end -- the first pass only
+        local p = camera.plan
+        local phase = camera.shot == WHEEL_PASS and p ~= nil and p.shot == WHEEL_PASS and p.phase or nil
+        if phase ~= nil and phase ~= lastPhase then r.order[#r.order + 1] = phase end
+        local x, y, z = getWorldTranslation(cn)
+        -- The glide in, held exactly from its first frame: still no jumps.
+        local rx, ry = nodes[cn].rx, nodes[cn].ry
+        if phase == "approach" and r.gx ~= nil then
+            r.glideStep = math.max(r.glideStep or 0, math.sqrt((x - r.gx) ^ 2 + (y - r.gy) ^ 2 + (z - r.gz) ^ 2))
+            r.glideTurn = math.max(r.glideTurn or 0, math.max(math.deg(math.abs(rx - r.grx)), math.deg(math.abs(wrapAngle(ry - r.gry)))))
+        end
+        r.gx, r.gy, r.gz, r.grx, r.gry = x, y, z, rx, ry
+        -- From arrival on the spot (the approach included: the pan starts
+        -- before the front comes level) until it rises.
+        if (phase == "approach" or phase == "pass" or phase == "watch") and camera.fromPose == nil then
+            local rigNow = DroneCamRig.measure(vehicle, heading)
+            if px ~= nil and phase ~= "approach" then
+                local move = math.sqrt((x - px) ^ 2 + (y - py) ^ 2 + (z - pz) ^ 2)
+                r.maxMove = math.max(r.maxMove, move)
+                if phase == "watch" then r.watchMove = r.watchMove + move end
+            end
+            -- How far the view turns in a frame, and how fast that changes.
+            local dx, dy, dz = localDirectionToWorld(cn, 0, 0, -1)
+            if r.lastDir ~= nil then
+                local l = r.lastDir
+                local turn = math.deg(math.acos(math.min(math.max(dx * l[1] + dy * l[2] + dz * l[3], -1), 1)))
+                r.maxTurn = math.max(r.maxTurn or 0, turn)
+                if r.lastTurn ~= nil then r.maxTurnJerk = math.max(r.maxTurnJerk or 0, math.abs(turn - r.lastTurn)) end
+                r.lastTurn = turn
+            end
+            r.lastDir = { dx, dy, dz }
+            local sx, sy, sz = DroneCamCreator.getWheelPassSubject(camera, vehicle, p)
+            r.maxAimError = math.max(r.maxAimError, angleTo(x, y, z, sx, sy, sz))
+            local _, sAlong = DroneCamRig.toLocal(rigNow, sx, sz)
+            r.subjectAlongs[#r.subjectAlongs + 1] = sAlong
+            -- Each part is looked at in turn while it goes by (within a few
+            -- metres of level with the camera), in the middle of the picture
+            -- (well inside the 55 degree field of view).
+            local _, camAlong = DroneCamRig.toLocal(rigNow, x, z)
+            local side = p.across >= 0 and 1 or -1
+            local parts = {
+                front = { side * 0.6, 2.5, 1.35 }, frontWheel = { side * 1.0, 1.5, 0.55 },
+                cab = { side * 0.6, 0.15, 1.8 }, rearWheel = { side * 1.0, -1.2, 0.8 },
+                implement = { side * 1.0, -4.6, 0.56 } }
+            for name, part in pairs(parts) do
+                if math.abs(sAlong - part[2]) < 0.3 and phase ~= "watch" then
+                    local wx, wz = DroneCamRig.toWorld(rigNow, part[1], part[2])
+                    r.framed[name] = math.max(r.framed[name] or 0, angleTo(x, y, z, wx, TERRAIN_HEIGHT + part[3], wz))
+                    r.near[name] = math.min(r.near[name] or math.huge, math.abs(camAlong - part[2]))
+                end
+            end
+            if phase == "watch" then
+                r.watchTime = r.watchTime + dtSeconds
+                -- The near half of the cultivator (4m wide, 1.4m tall, its
+                -- work area centred 4.6m behind the tractor's root).
+                local ix, iz = DroneCamRig.toWorld(rigNow, side * 1.0, -4.6)
+                r.watchOffImplement = math.max(r.watchOffImplement, angleTo(x, y, z, ix, TERRAIN_HEIGHT + 0.56, iz))
+            end
+            px, py, pz = x, y, z
+        end
+        if p ~= nil and p.shot == WHEEL_PASS and p.isDone then r.done = true end
+        lastPhase = phase
+    end)
+    return r
+end
+
+print("\n-- wheel pass: following the rig --")
+for _, speed in ipairs({ 3, 6.5 }) do
+    local wp = flyWheelPass(speed)
+    local kmh = ("at %.0f km/h"):format(speed * 3.6)
+    print(("        %s: phases %s, aim error %.2f deg, turn %.2f deg/frame (change %.3f), watched %.1fs")
+          :format(kmh, table.concat(wp.order, ">"), wp.maxAimError, wp.maxTurn or -1, wp.maxTurnJerk or -1, wp.watchTime))
+    for _, name in ipairs({ "front", "frontWheel", "cab", "rearWheel", "implement" }) do
+        print(("          %-10s looked at %.1f deg off, %.1fm from level"):format(name, wp.framed[name] or -1, wp.near[name] or -1))
+    end
+    check("wheel pass " .. kmh .. ": approach > pass > watch > rise > join > tail",
+          table.concat(wp.order, ">") == "approach>pass>watch>rise>join>tail" and wp.done, table.concat(wp.order, ">"))
+    check("the camera stays put while the rig goes by", wp.maxMove < 0.001, ("%.4fm in a frame"):format(wp.maxMove))
+    check("the view is on its subject every frame, no lag", wp.maxAimError < 0.5, ("%.2f deg"):format(wp.maxAimError))
+    check("and turns smoothly: no more than 3 deg a frame, changing by under 0.3 deg a frame",
+          (wp.maxTurn or 99) < 3 and (wp.maxTurnJerk or 99) < 0.3,
+          ("%.2f deg, %.3f deg"):format(wp.maxTurn or -1, wp.maxTurnJerk or -1))
+    local ok, worst = true, ""
+    for _, name in ipairs({ "front", "frontWheel", "cab", "rearWheel", "implement" }) do
+        if wp.framed[name] == nil or wp.framed[name] > 15 or wp.near[name] > 4 then
+            ok, worst = false, ("%s %s deg, %s m off level"):format(name, tostring(wp.framed[name]), tostring(wp.near[name]))
+        end
+    end
+    check("front, front wheel, cab, rear wheel and implement each looked at as they pass", ok, worst)
+    local inOrder = #wp.subjectAlongs > 0
+    for i = 2, #wp.subjectAlongs do
+        if wp.subjectAlongs[i] > wp.subjectAlongs[i - 1] + 1e-6 then inOrder = false end
+    end
+    check("in that order, front to back", inOrder and wp.subjectAlongs[1] >= 2.5 - 0.01
+          and wp.subjectAlongs[#wp.subjectAlongs] <= -4.6 + 0.01)
+    check("glides in without a jump", wp.glideStep ~= nil and wp.glideStep < MAX_STEP and wp.glideTurn < MAX_TURN,
+          ("%.2fm / %.2f deg in a frame"):format(wp.glideStep or -1, wp.glideTurn or -1))
+    check("watches the implement drive away for 2-3 seconds", wp.watchTime >= 2 and wp.watchTime <= 3,
+          ("%.2fs"):format(wp.watchTime))
+    check("still and on the implement while it watches", wp.watchMove < 0.001 and wp.watchOffImplement < 2,
+          ("%.4fm, %.1f deg"):format(wp.watchMove, wp.watchOffImplement))
+end
+
+-- Still the rule: wheel pass for kit on the ground, drive-over otherwise.
+startOn({ width = 2.6, length = 5, height = 3, wheels = TRACTOR.wheels, bodies = { BODY },
+          implements = { { along = -9, width = 2.5, length = 4, height = 2.5, noWork = true, specs = { spec_trailer = {} },
+                           wheels = { { across = 0.95, along = -9, radius = 0.5 } },
+                           bodies = { { -1.25, 1.25, 0.9, 2.5, -11, -7 }, { -1.25, 1.25, 0.6, 0.7, -9.1, -8.9 } } } } })
+DroneCam.settings.mode = MODE_DO
+local trailerMode = driveMode(8, 0)
+check("drive-over mode with a trailer: a drive-over, not a wheel pass", trailerMode.passes[1] == DRIVE_OVER,
+      tostring(trailerMode.passes[1]))
+
 -- Not possible: says why, on screen and in the log, once, and stays on the chase.
 startOn(SOLO_TRACTOR)
 DroneCam.settings.mode = MODE_DO

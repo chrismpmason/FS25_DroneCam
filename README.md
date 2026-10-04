@@ -173,10 +173,15 @@ obstacle lift.
 
 **Drive-over mode.** The last mode on Ctrl+C sets up a drive-over on every
 straight run. When the drive-over isn't allowed (see the table above) or the
-underside doesn't clear, it sets up a **wheel pass** instead: the camera sits
-0.4m up just outside the widest part of the combination and sweeps along it as
-it rolls past, then rises into the chase. A boom unfolding beside the camera
-calls that off too. The log says why it wasn't a drive-over ("wheel pass set
+underside doesn't clear, it sets up a **wheel pass** instead. The camera
+stands still 0.4m up, just outside the widest part of the combination, and
+turns to follow the rig live. It watches the front of the tractor come in,
+then pans back along it (front wheel, cab, rear wheel) to the implement
+working the ground. Once everything has gone by it watches the implement
+drive away for 2.5 seconds, then rises into the chase. The pan starts and
+ends gently, and the view is held exactly on its subject from the moment the
+camera sets off for its spot, so nothing trails behind even at speed. A boom
+unfolding beside the camera calls the pass off too. The log says why it wasn't a drive-over ("wheel pass set
 up (no drive-over: …)"). In between, and through headland turns, it holds a
 low chase, and sets up the next pass once the vehicle has been straight for
 1.5s (and at least 5s after the last). If a pass can't be done the reason stays

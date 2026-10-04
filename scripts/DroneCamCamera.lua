@@ -1007,7 +1007,7 @@ function DroneCamCamera:getDebugLines()
     local lines = {}
     local name = DroneCamCamera.SHOT_NAMES[self.shot] or tostring(self.shot)
     local plan = self.plan
-    if self.shot == DroneCamSettings.SHOT_DRIVE_OVER and plan ~= nil and plan.shot == self.shot then
+    if DroneCamCreator.getIsGroundPass(self.shot) and plan ~= nil and plan.shot == self.shot then
         name = name .. " - " .. tostring(plan.phase)
     end
     if self.fromPose ~= nil then
@@ -1114,6 +1114,10 @@ DroneCamCamera.LOW_CHASE_BEHIND_PER_SCALE = 4
 DroneCamCamera.LOW_CHASE_HEIGHT = 4
 DroneCamCamera.LOW_CHASE_LOOK_AHEAD = 6
 DroneCamCamera.LOW_CHASE_CLEARANCE = 2.5
+
+---The wheel pass takes up an exact hold on its spot and subject over this
+---long (seconds) once it has glided in.
+DroneCamCamera.WHEEL_PASS_LOCK_TIME = 1
 
 ---Tracks whether the vehicle is turning, the same way the director does, for
 ---drive-over mode (which runs without the director).
@@ -1602,6 +1606,24 @@ function DroneCamCamera:update(dt, vehicle)
         posAlpha = 1
     end
 
+    -- The wheel pass stands still and turns to follow the rig part by part:
+    -- the view is put exactly on its subject, which moves smoothly with the
+    -- rig, so nothing trails behind however fast the vehicle goes. The hold
+    -- starts with the glide in (which sets off from exactly where the camera
+    -- is, so there is nothing to catch up) and eases in over
+    -- WHEEL_PASS_LOCK_TIME, so the camera never lags on arrival either.
+    local isWheelPassLow = isGroundLow and self.shot == DroneCamSettings.SHOT_WHEEL_PASS
+    local isWheelPassHeld = not isBlendingOut and self.shot == DroneCamSettings.SHOT_WHEEL_PASS
+        and DroneCamCreator.getIsDriveOverGrounded(self)
+    if isWheelPassHeld then
+        self.wheelPassLock = math.min((self.wheelPassLock or 0) + dtSeconds / DroneCamCamera.WHEEL_PASS_LOCK_TIME, 1)
+        local lock = smoothstep(self.wheelPassLock)
+        posAlpha = lerp(posAlpha, 1, lock)
+        lookAlpha = lerp(lookAlpha, 1, lock)
+    else
+        self.wheelPassLock = 0
+    end
+
     -- A cut away from a called-off ground pass: straight there, in one frame.
     local isCutting = self.isCutting == true and not isBlendingOut
     self.isCutting = false
@@ -1676,6 +1698,8 @@ function DroneCamCamera:update(dt, vehicle)
         if isDriveOverLow and self.plan.phase == "swing" then
             -- The drive-over's swing is meant to be quick.
             maxRate = DroneCamCreator.DRIVE_OVER_SWING_YAW_RATE
+        elseif isWheelPassLow then
+            maxRate = DroneCamCreator.WHEEL_PASS_YAW_RATE
         end
         local maxTurn = maxRate * dtSeconds
         local turn = normaliseAngleDiff(rotY - self.lastRotY)

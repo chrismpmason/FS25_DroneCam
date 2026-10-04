@@ -159,11 +159,16 @@ DroneCamCreator.WHEEL_PASS_HEIGHT = 0.4
 DroneCamCreator.WHEEL_PASS_GAP = 2.2
 DroneCamCreator.WHEEL_PASS_MIN_DISTANCE = 25
 DroneCamCreator.WHEEL_PASS_MAX_DISTANCE = 35
----The camera aims this far along the vehicle past itself, so the view sweeps
----from the front, along the side and wheels, to the implement.
-DroneCamCreator.WHEEL_PASS_LOOK_AHEAD = 4
----How far past the camera the rear of the combination must be before it rises.
-DroneCamCreator.WHEEL_PASS_CLEAR_BEHIND = 3
+---The view pans back along the rig from the front of the tractor to the
+---implement: starting when the front is this far short of level with the
+---camera, ending this far after the implement has gone by.
+DroneCamCreator.WHEEL_PASS_PAN_START = 4
+DroneCamCreator.WHEEL_PASS_PAN_END = 1.5
+---Once everything has gone by, it watches the implement drive away this
+---long (seconds) before rising.
+DroneCamCreator.WHEEL_PASS_WATCH_TIME = 2.5
+---The view may turn this fast while following the rig past, close in at speed.
+DroneCamCreator.WHEEL_PASS_YAW_RATE = math.rad(240)
 DroneCamCreator.WHEEL_PASS_RISE_HEIGHT = 3
 ---While still well off, it gives up if the vehicle drifts this far off its line.
 DroneCamCreator.WHEEL_PASS_MAX_OFF_LINE = 1
@@ -1098,8 +1103,10 @@ end
 
 ---Advances the wheel pass through its phases:
 ---  approach  the vehicle drives towards the camera
----  pass      it is going by: the view sweeps along it
----  rise      everything has gone by: climb to WHEEL_PASS_RISE_HEIGHT
+---  pass      it is going by: the view follows it part by part
+---  watch     everything has gone by: watch the implement drive away for
+---            WHEEL_PASS_WATCH_TIME
+---  rise      climb to WHEEL_PASS_RISE_HEIGHT
 ---  join, tail  as the drive-over
 function DroneCamCreator.updateWheelPass(camera, dtSeconds, vehicle)
     local plan = camera.plan
@@ -1153,7 +1160,13 @@ function DroneCamCreator.updateWheelPass(camera, dtSeconds, vehicle)
         if plan.phase == "approach" and along <= rig.rootFront then
             plan.phase = "pass"
         end
-        if plan.phase == "pass" and along <= rig.rear - DroneCamCreator.WHEEL_PASS_CLEAR_BEHIND then
+        if plan.phase == "pass" and along <= rig.rear then
+            plan.phase = "watch"
+            plan.watchTime = 0
+        end
+    elseif plan.phase == "watch" then
+        plan.watchTime = plan.watchTime + dtSeconds
+        if plan.watchTime >= DroneCamCreator.WHEEL_PASS_WATCH_TIME then
             plan.phase = "rise"
             plan.riseTime = 0
         end
@@ -1178,7 +1191,106 @@ function DroneCamCreator.updateWheelPass(camera, dtSeconds, vehicle)
     end
 end
 
----Transform for the wheel pass, phase by phase.
+---The parts of the rig the wheel pass looks at in turn, front to back, on
+---the camera's side: the front of the tractor, its front wheel, the cab, its
+---rear wheel, then the implement working the ground (or the rear of the rig
+---if nothing is). Rig-local: across, along, height above the ground.
+---@return table @{{across, along, height}, ...}, along descending
+local function getWheelPassSubjects(rig, side)
+    local front, rear = nil, nil
+    for _, wheel in ipairs(rig.wheels) do
+        if wheel.lx * side > 0 then
+            if front == nil or wheel.lz > front.lz then front = wheel end
+            if rear == nil or wheel.lz < rear.lz then rear = wheel end
+        end
+    end
+    local rootLength = rig.rootFront - rig.rootRear
+    local frontLz = front ~= nil and front.lz or rig.rootFront - rootLength * 0.25
+    local rearLz = rear ~= nil and rear.lz or rig.rootRear + rootLength * 0.25
+    local bodyAcross = side * rig.rootHalfWidth * 0.5
+
+    local subjects = {
+        { bodyAcross, rig.rootFront, rig.rootHeight * 0.45 },
+        { front ~= nil and front.lx or bodyAcross, frontLz, front ~= nil and front.hub or 0.6 },
+        { bodyAcross, (frontLz + rearLz) * 0.5, rig.rootHeight * 0.6 },
+        { rear ~= nil and rear.lx or bodyAcross, rearLz, rear ~= nil and rear.hub or 0.6 }
+    }
+
+    local work = rig.work
+    if work ~= nil and work.lz < rearLz then
+        -- The near half of the implement, at the height of its body.
+        local height = 0.5
+        for _, box in ipairs(rig.boxes) do
+            if not box.isRoot and math.abs(box.centreAlong - work.lz) <= box.halfLength + 0.5 then
+                height = math.max(height, box.height * 0.4)
+            end
+        end
+        subjects[#subjects + 1] = { work.lx + side * work.halfWidth * 0.5, work.lz, height }
+    elseif rig.rear < rearLz - 0.5 then
+        subjects[#subjects + 1] = { 0, rig.rear + 0.5, 0.6 }
+    end
+    return subjects
+end
+
+---Smooth curve through the subjects' values (index k: 1 across, 3 height)
+---at a point along the rig: a cubic through each pair, its slope at each
+---subject set by its neighbours, so the aim glides through every subject
+---rather than stopping at each.
+local function getSubjectValue(subjects, along, k)
+    local n = #subjects
+    if along >= subjects[1][2] then
+        return subjects[1][k]
+    elseif along <= subjects[n][2] then
+        return subjects[n][k]
+    end
+    local function slope(i)
+        if i <= 1 or i >= n then
+            return 0
+        end
+        return (subjects[i + 1][k] - subjects[i - 1][k]) / (subjects[i + 1][2] - subjects[i - 1][2])
+    end
+    for i = 1, n - 1 do
+        local a, b = subjects[i], subjects[i + 1]
+        if along <= a[2] and along >= b[2] then
+            local span = b[2] - a[2]
+            local t = (along - a[2]) / span
+            local t2, t3 = t * t, t * t * t
+            return (2 * t3 - 3 * t2 + 1) * a[k] + (t3 - 2 * t2 + t) * span * slope(i)
+                + (-2 * t3 + 3 * t2) * b[k] + (t3 - t2) * span * slope(i + 1)
+        end
+    end
+    return subjects[n][k]
+end
+
+---Where the wheel pass is looking. Until the front is WHEEL_PASS_PAN_START
+---short of level with the camera, at the front of the tractor, following it
+---in; then panning back along the rig (front wheel, cab, rear wheel) to the
+---implement, which it reaches WHEEL_PASS_PAN_END after the implement has
+---gone by, and then following that away. The pan starts and ends at rest,
+---so the view never jerks. Worked out from the rig as it is this frame, so
+---it never lags behind.
+---@return number, number, number @World position
+function DroneCamCreator.getWheelPassSubject(camera, vehicle, plan)
+    local rig = camera:getRig(vehicle)
+    if rig == nil then
+        return getVehicleAim(vehicle)
+    end
+    local side = plan.across >= 0 and 1 or -1
+    local subjects = getWheelPassSubjects(rig, side)
+    local _, cameraAlong = DroneCamRig.toLocal(rig, plan.x, plan.z)
+    local first, last = subjects[1][2], subjects[#subjects][2]
+
+    local panFrom = first + DroneCamCreator.WHEEL_PASS_PAN_START
+    local panTo = last - DroneCamCreator.WHEEL_PASS_PAN_END
+    local progress = math.min(math.max((panFrom - cameraAlong) / math.max(panFrom - panTo, 0.01), 0), 1)
+    local along = lerp(first, last, smoothstep(progress))
+
+    local x, z = DroneCamRig.toWorld(rig, getSubjectValue(subjects, along, 1), along)
+    return x, getTerrainHeight(x, z, rig.ground) + getSubjectValue(subjects, along, 3), z
+end
+---Transform for the wheel pass, phase by phase. The camera stays put from
+---arrival until it rises; only the view turns, held exactly on the subject
+---(DroneCamCamera does no look smoothing while the pass is low).
 local function getWheelPassTransform(camera, vehicle, plan)
     local rig = camera:getRig(vehicle)
     local chaseX, chaseY, chaseZ, chaseLookX, chaseLookY, chaseLookZ = camera:getModeTransform(vehicle, S.MODE_CHASE)
@@ -1186,20 +1298,14 @@ local function getWheelPassTransform(camera, vehicle, plan)
         return chaseX, chaseY, chaseZ, chaseLookX, chaseLookY, chaseLookZ, nil, nil, 0
     end
 
-    -- Aim at the part of the vehicle just coming level with the camera: the
-    -- front while it approaches, then sweeping back along the side and
-    -- wheels to whatever is towed.
-    local along = plan.along or rig.front
-    local lookAlong = math.min(math.max(along + DroneCamCreator.WHEEL_PASS_LOOK_AHEAD, rig.rear), rig.rootFront)
-    local lookX, lookZ = DroneCamRig.toWorld(rig, 0, lookAlong)
-    local lookY = rig.ground + math.max(1, rig.rootHeight * 0.35)
+    local lookX, lookY, lookZ = DroneCamCreator.getWheelPassSubject(camera, vehicle, plan)
 
     local riseY = plan.ground + DroneCamCreator.WHEEL_PASS_RISE_HEIGHT
     local risen = smoothstep(plan.riseProgress)
     local y = lerp(plan.y, riseY, risen)
 
     local phase = plan.phase
-    if phase == "approach" or phase == "pass" then
+    if phase == "approach" or phase == "pass" or phase == "watch" then
         return plan.x, plan.y, plan.z, lookX, lookY, lookZ, nil, nil, 0
     end
 
