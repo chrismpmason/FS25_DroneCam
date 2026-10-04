@@ -126,7 +126,7 @@ the newest version is at the top of the page. Download `FS25_DroneCam_beta.zip`
 under **Assets**. `TESTERS.txt` alongside it lists what to try and what to send
 back.
 
-Current beta: [DroneCam v0.9.4.3 Beta](https://github.com/chrismpmason/FS25_DroneCam/releases/tag/v0.9.4.3-beta).
+Current beta: [DroneCam v0.9.4.4 Beta](https://github.com/chrismpmason/FS25_DroneCam/releases/tag/v0.9.4.4-beta).
 
 Use the zip from the release, not GitHub's green **Code** button: that
 downloads the source, with development files the game doesn't need.
